@@ -1,0 +1,32 @@
+{
+  "type": "GPCR_ClassA",
+  "ligand_features": {
+    "physchem": true,
+    "ecfp4": {
+      "radius": 2,
+      "n_bits": 2048,
+      "use_counts": false,
+      "use_chirality": false
+    },
+    "n_features_ligand": 2058
+  },
+  "receptor_features": {
+    "n_features_receptor": 31,
+    "note": "Aggregated from *_pocket_residues_with_conservation.csv per receptor folder"
+  },
+  "interaction_features": {
+    "n_features_interaction": 14,
+    "note": "Pairwise products ligand_core x receptor_dict; exact pairs in handoff spec \u00a75.3"
+  },
+  "n_features_total": 2103,
+  "class_names": [
+    "Agonist",
+    "Antagonist",
+    "Inactive"
+  ],
+  "class_ids": {
+    "Agonist": 0,
+    "Antagonist": 1,
+    "Inactive": 2
+  }
+}

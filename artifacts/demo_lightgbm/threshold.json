@@ -1,0 +1,10 @@
+{
+  "threshold": null,
+  "note": "Multi-class classification uses argmax (highest probability). Threshold not applicable unless using binary classification.",
+  "evaluation_regimes": [
+    "Baseline (global independent-ligand split)",
+    "Random stratified (80/20 compound-level split)",
+    "Scaffold split (Bemis-Murcko scaffold-based)",
+    "LORO (Leave-One-Receptor-Out)"
+  ]
+}
