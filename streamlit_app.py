@@ -59,6 +59,11 @@ def _is_valid_gpcr_data_root(path: Path) -> bool:
     return (path / "Josh_Receptor_Features").is_dir()
 
 
+def _is_manuscript_ready_gpcr_root(path: Path) -> bool:
+    """Full training tree: pocket CSVs plus ML_code (shared_utilities, *_NEW.xlsx)."""
+    return _is_valid_gpcr_data_root(path) and (path / "ML_code").is_dir()
+
+
 def _apply_gpcr_data_root(root: Path) -> None:
     """Set GPCR_DATA_ROOT and MANUSCRIPT_ML_ROOT when layout is recognized."""
     root = root.resolve()
@@ -96,11 +101,14 @@ def _ensure_default_gpcr_data_root() -> None:
         _apply_gpcr_data_root(Path(existing))
         return
     gui = PROJECT_ROOT.parent / "GUI_Folder"
-    if _is_valid_gpcr_data_root(gui):
+    if _is_manuscript_ready_gpcr_root(gui):
         _apply_gpcr_data_root(gui)
         return
-    if _is_valid_gpcr_data_root(PROJECT_ROOT):
+    if _is_manuscript_ready_gpcr_root(PROJECT_ROOT):
         _apply_gpcr_data_root(PROJECT_ROOT)
+        return
+    # Pocket CSVs only (no ML_code): do not set GPCR_DATA_ROOT here — cloud bootstrap
+    # must download the full zip when DATA_ZIP_URL is configured.
 
 
 _ensure_default_gpcr_data_root()
@@ -169,8 +177,10 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
     base = (PROJECT_ROOT / data_dir_name).resolve()
     marker = base / ".gpcr_data_ready"
     root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
-    if root and marker.exists():
+    if root and marker.exists() and _is_manuscript_ready_gpcr_root(root):
         return str(root)
+    if marker.exists():
+        marker.unlink(missing_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="gpcr_zip_") as tmp:
         zip_path = Path(tmp) / "gpcr_data.zip"
@@ -185,22 +195,42 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
             f"Extracted data under {base} but no Josh_Receptor_Features folder found. "
             "Set DATA_EXTRACTED_SUBDIR in secrets to the folder inside the zip."
         )
+    if not _is_manuscript_ready_gpcr_root(root):
+        raise FileNotFoundError(
+            f"Extracted data at {root} is missing ML_code. "
+            "Use the full training zip (GPCRtryagain - Delete - Copy), not pocket CSVs only."
+        )
     marker.write_text(str(root), encoding="utf-8")
     return str(root)
+
+
+def _log_manuscript_debug(prefix: str = "post-bootstrap") -> None:
+    try:
+        from src.gpcr.manuscript_features import manuscript_debug_status
+
+        dbg = manuscript_debug_status(PROJECT_ROOT)
+        msg = " ".join(f"{k}={v}" for k, v in dbg.items())
+        print(f"[manuscript-debug:{prefix}] {msg}")
+    except Exception as exc:
+        print(f"[manuscript-debug:{prefix}] status unavailable: {exc}")
 
 
 def _bootstrap_cloud_gpcr_data() -> None:
     """
     On Streamlit Cloud: download DATA_ZIP_URL, extract, set GPCR_DATA_ROOT / MANUSCRIPT_ML_ROOT.
-    Skipped when a valid local GPCR_DATA_ROOT is already configured.
+    Skipped only when the current root already has Josh_Receptor_Features and ML_code.
     """
+    zip_url = _read_deploy_cfg("DATA_ZIP_URL")
     current = os.environ.get("GPCR_DATA_ROOT", "").strip()
-    if current and _is_valid_gpcr_data_root(Path(current)):
+    if current and _is_manuscript_ready_gpcr_root(Path(current)):
         _apply_gpcr_data_root(Path(current))
+        _log_manuscript_debug("ready")
         return
 
-    zip_url = _read_deploy_cfg("DATA_ZIP_URL")
     if not zip_url:
+        if current and _is_valid_gpcr_data_root(Path(current)):
+            _apply_gpcr_data_root(Path(current))
+        _log_manuscript_debug("no-zip-url")
         return
 
     data_dir_name = _read_deploy_cfg("DATA_DIR", "runtime_data")
@@ -214,6 +244,11 @@ def _bootstrap_cloud_gpcr_data() -> None:
             ml = os.environ.get("MANUSCRIPT_ML_ROOT", "")
             if ml:
                 st.write(f"Using **MANUSCRIPT_ML_ROOT**: `{ml}`")
+            _log_manuscript_debug("after-download")
+            if not os.environ.get("MANUSCRIPT_ML_ROOT", "").strip():
+                st.warning(
+                    "Downloaded data has no **ML_code** folder — manuscript predictions will be inaccurate."
+                )
     except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError) as exc:
         st.error(f"Could not prepare GPCR data from DATA_ZIP_URL: {exc}")
         st.info(
