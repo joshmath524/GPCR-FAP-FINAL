@@ -145,12 +145,15 @@ def _google_drive_file_id(url: str) -> str:
     raise ValueError(f"Could not parse Google Drive file id from: {url}")
 
 
-def _google_drive_download_url(url_or_id: str) -> str:
+def _resolve_google_drive_file_id(url_or_id: str) -> str:
     raw = url_or_id.strip()
     if raw.startswith("http"):
-        file_id = _google_drive_file_id(raw)
-    else:
-        file_id = raw
+        return _google_drive_file_id(raw)
+    return raw
+
+
+def _google_drive_download_url(url_or_id: str) -> str:
+    file_id = _resolve_google_drive_file_id(url_or_id)
     return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 
