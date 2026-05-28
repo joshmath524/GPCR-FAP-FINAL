@@ -631,22 +631,39 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PREDICTOR (cached)
+# PREDICTOR (single in-memory slot — avoids OOM on Streamlit Cloud)
 # ============================================================================
 
-@st.cache_resource
-def get_predictor(
+def load_active_predictor(
     model_type: Optional[str] = None,
     evaluation_regime: Optional[str] = None,
     seed: int = 42,
 ):
-    """Load predictor (manuscript regimes or legacy demo bundle)."""
-    return load_predictor(
-        HANDOFF_DIR,
-        model_type=model_type,
-        evaluation_regime=evaluation_regime,
-        seed=seed,
-    )
+    """
+    Load at most one predictor per session.
+
+    ``@st.cache_resource`` kept every model type in RAM after a dropdown change;
+    ensemble + RF together exceeds Streamlit Cloud's ~1 GiB limit.
+    """
+    key = (evaluation_regime or "", model_type or "", int(seed))
+    cached = st.session_state.get("_active_predictor")
+    if st.session_state.get("_predictor_key") == key and cached is not None:
+        return cached
+
+    st.session_state.pop("_active_predictor", None)
+    _gc.collect()
+
+    label = (model_type or "rf").replace("_", " ").title()
+    with st.spinner(f"Loading {label} model…"):
+        predictor = load_predictor(
+            HANDOFF_DIR,
+            model_type=model_type,
+            evaluation_regime=evaluation_regime,
+            seed=seed,
+        )
+    st.session_state["_predictor_key"] = key
+    st.session_state["_active_predictor"] = predictor
+    return predictor
 
 # ============================================================================
 # PAGES
@@ -885,7 +902,7 @@ def render_demo_prediction_page():
     model_type = model_type_map[model_type_label]
 
     try:
-        predictor = get_predictor(model_type)
+        predictor = load_active_predictor(model_type)
     except Exception as e:
         st.error(f"Could not load {model_type_label} model: {e}")
         st.info(
@@ -1025,10 +1042,9 @@ def render_gpcr_prediction_page():
 
     if evaluation_regime and _ms_regimes.get(evaluation_regime):
         available_models = list(_ms_regimes[evaluation_regime].keys())
-        model_options = [_model_labels[m] for m in ("ensemble", "rf", "lightgbm", "xgboost") if m in available_models]
+        # RF first (default) — ensemble loads RF+XGB+LGB+meta and often OOMs on Cloud.
+        model_options = [_model_labels[m] for m in ("rf", "lightgbm", "xgboost", "ensemble") if m in available_models]
         default_model_ix = 0
-        if "Ensemble (stacking)" in model_options:
-            default_model_ix = model_options.index("Ensemble (stacking)")
     else:
         model_options = list(_model_labels.values())
         default_model_ix = 0
@@ -1067,7 +1083,7 @@ def render_gpcr_prediction_page():
         return
 
     try:
-        predictor = get_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
+        predictor = load_active_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
     except Exception as e:
         st.error(f"Could not load {model_type_label} model: {e}")
         if evaluation_regime:
