@@ -168,3 +168,38 @@ def build_demo_2103_features(receptor_input: str, ligand_smiles: str) -> Optiona
     if canon is None:
         return None
     return _compute_full_features(receptor_input, canon)
+
+
+def manuscript_debug_status(project_root: Path) -> Dict[str, object]:
+    """
+    Runtime diagnostics for manuscript feature-path resolution.
+
+    Used by Streamlit to surface whether inference is using training-aligned assets
+    or falling back to sparse/derived features.
+    """
+    root = _manuscript_root(project_root)
+    manifest_path = root / "manifest.json"
+    lookup_path = root / "ligand_feature_lookup.joblib"
+    gpcr_root = Path(os.environ.get("GPCR_DATA_ROOT", "").strip() or project_root)
+    ml_root = os.environ.get("MANUSCRIPT_ML_ROOT", "").strip()
+    su = _try_import_shared_utilities()
+
+    lookup, lookup_source = _load_ligand_lookup(project_root)
+    feature_columns_count = 0
+    if manifest_path.exists():
+        try:
+            feature_columns_count = len(load_feature_columns(project_root))
+        except Exception:
+            feature_columns_count = 0
+
+    return {
+        "gpcr_data_root": str(gpcr_root.resolve()),
+        "ml_root": ml_root,
+        "ml_root_exists": bool(ml_root and Path(ml_root).is_dir()),
+        "shared_utilities_imported": su is not None,
+        "manifest_exists": manifest_path.exists(),
+        "manifest_feature_count": feature_columns_count,
+        "ligand_lookup_exists": lookup_path.exists(),
+        "ligand_lookup_entries": len(lookup),
+        "ligand_lookup_source": lookup_source,
+    }
