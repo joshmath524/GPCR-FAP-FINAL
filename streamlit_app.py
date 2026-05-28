@@ -4,6 +4,7 @@ GPCR Class A Functional Activity Prediction Streamlit GUI.
 Run from this folder (project root):
   streamlit run streamlit_app.py
 """
+import http.cookiejar
 import os
 import re
 import shutil
@@ -129,37 +130,171 @@ def _read_deploy_cfg(key: str, default: str = "") -> str:
     return default
 
 
-def _download_google_drive(url: str, dest_zip: Path) -> None:
-    """Download a Google Drive file (handles large-file confirm token)."""
-    dest_zip.parent.mkdir(parents=True, exist_ok=True)
-    session_headers = {"User-Agent": "Mozilla/5.0"}
+def _google_drive_file_id(url: str) -> str:
+    """Parse file id from common Google Drive share / uc URLs."""
+    url = url.strip()
+    for pattern in (
+        r"[?&]id=([a-zA-Z0-9_-]+)",
+        r"/file/d/([a-zA-Z0-9_-]+)",
+        r"/open\?id=([a-zA-Z0-9_-]+)",
+    ):
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    raise ValueError(f"Could not parse Google Drive file id from: {url}")
 
-    def _stream_to_file(download_url: str, out_path: Path) -> None:
-        req = urllib.request.Request(download_url, headers=session_headers)
-        with urllib.request.urlopen(req, timeout=600) as resp, open(out_path, "wb") as out:
-            while True:
-                chunk = resp.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                out.write(chunk)
 
-    probe_path = dest_zip.with_suffix(".probe")
-    _stream_to_file(url, probe_path)
-    head = probe_path.read_bytes()[:512]
-    if b"<!DOCTYPE html" in head.lower() or b"<html" in head.lower():
-        text = probe_path.read_text(encoding="utf-8", errors="ignore")
-        probe_path.unlink(missing_ok=True)
-        match = re.search(r"confirm=([0-9A-Za-z_]+)", text)
-        if not match:
-            raise RuntimeError(
-                "Google Drive returned HTML instead of a zip. "
-                "Use a direct-download link (uc?export=download&id=...) or share the file publicly."
-            )
-        sep = "&" if "?" in url else "?"
-        confirm_url = f"{url}{sep}confirm={match.group(1)}"
-        _stream_to_file(confirm_url, dest_zip)
+def _resolve_google_drive_file_id(url_or_id: str) -> str:
+    raw = url_or_id.strip()
+    if raw.startswith("http"):
+        return _google_drive_file_id(raw)
+    return raw
+
+
+def _google_drive_download_url(url_or_id: str) -> str:
+    file_id = _resolve_google_drive_file_id(url_or_id)
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
+
+
+def _looks_like_zip_file(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size < 4:
+        return False
+    with open(path, "rb") as fh:
+        head = fh.read(512)
+    lower = head.lower()
+    if b"<html" in lower or b"<!doctype" in lower:
+        return False
+    return head[:2] == b"PK" or path.stat().st_size > 50_000_000
+
+
+def _stream_url_to_file(opener: urllib.request.OpenerDirector, download_url: str, dest: Path) -> None:
+    with opener.open(download_url, timeout=3600) as resp, open(dest, "wb") as out:
+        while True:
+            chunk = resp.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+
+
+def _gdown_download_file(file_id: str, dest_zip: Path) -> None:
+    """gdown 4.x–6.x compatible (no fuzzy= — removed in gdown 6)."""
+    import gdown
+
+    uc_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    share_url = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+    last_error: Optional[Exception] = None
+
+    for kwargs in (
+        {"id": file_id, "output": str(dest_zip), "quiet": False},
+        {"url": uc_url, "output": str(dest_zip), "quiet": False},
+        {"url": share_url, "output": str(dest_zip), "quiet": False},
+    ):
+        try:
+            gdown.download(**kwargs)
+            if _looks_like_zip_file(dest_zip):
+                return
+            dest_zip.unlink(missing_ok=True)
+        except TypeError as exc:
+            last_error = exc
+            try:
+                gdown.download(uc_url, str(dest_zip), quiet=False)
+                if _looks_like_zip_file(dest_zip):
+                    return
+                dest_zip.unlink(missing_ok=True)
+            except Exception as exc2:
+                last_error = exc2
+                dest_zip.unlink(missing_ok=True)
+        except Exception as exc:
+            last_error = exc
+            dest_zip.unlink(missing_ok=True)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("gdown did not produce a zip file")
+
+
+def _download_google_drive_with_cookies(download_url: str, dest_zip: Path) -> None:
+    """urllib + cookies fallback (large Drive files need confirm token)."""
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    opener.addheaders = [("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")]
+
+    resp = opener.open(download_url, timeout=3600)
+    peek = resp.read(65536)
+
+    confirm: Optional[str] = None
+    for cookie in cookie_jar:
+        if cookie.name.startswith("download_warning"):
+            confirm = cookie.value
+            break
+
+    text = peek.decode("utf-8", errors="ignore")
+    needs_confirm = b"<html" in peek.lower() or "virus scan" in text.lower()
+    if confirm is None and needs_confirm:
+        for pattern in (
+            r"confirm=([0-9A-Za-z_-]+)",
+            r"uuid=([0-9a-fA-F-]{36})",
+        ):
+            match = re.search(pattern, text)
+            if match:
+                confirm = match.group(1)
+                break
+        if confirm is None:
+            confirm = "t"
+
+    if confirm:
+        resp.close()
+        sep = "&" if "?" in download_url else "?"
+        final_url = f"{download_url}{sep}confirm={confirm}"
+        _stream_url_to_file(opener, final_url, dest_zip)
         return
-    probe_path.replace(dest_zip)
+
+    with open(dest_zip, "wb") as out:
+        out.write(peek)
+        while True:
+            chunk = resp.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+    resp.close()
+
+
+def _download_google_drive(url: str, dest_zip: Path) -> None:
+    """Download a Google Drive file (large zip: virus-scan confirm handled)."""
+    dest_zip.parent.mkdir(parents=True, exist_ok=True)
+    file_id = _resolve_google_drive_file_id(url)
+    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    usercontent_url = (
+        f"https://drive.usercontent.google.com/download?id={file_id}"
+        "&export=download&confirm=t"
+    )
+    errors: list[str] = []
+
+    try:
+        _gdown_download_file(file_id, dest_zip)
+        return
+    except ImportError:
+        errors.append("gdown not installed")
+    except Exception as exc:
+        errors.append(f"gdown: {exc}")
+        dest_zip.unlink(missing_ok=True)
+
+    for cookie_url in (usercontent_url, download_url):
+        try:
+            _download_google_drive_with_cookies(cookie_url, dest_zip)
+            if _looks_like_zip_file(dest_zip):
+                return
+            errors.append(f"cookie download from {cookie_url[:48]}... saved HTML or tiny file")
+            dest_zip.unlink(missing_ok=True)
+        except Exception as exc:
+            errors.append(f"urllib: {exc}")
+            dest_zip.unlink(missing_ok=True)
+
+    raise RuntimeError(
+        "Google Drive download failed. Share the zip as **Anyone with the link → Viewer**, "
+        "then set secrets to DATA_DRIVE_FILE_ID or DATA_ZIP_URL. "
+        f"Details: {'; '.join(errors)}"
+    )
 
 
 def _extract_data_zip(zip_path: Path, extract_dir: Path) -> None:
@@ -221,6 +356,8 @@ def _bootstrap_cloud_gpcr_data() -> None:
     Skipped only when the current root already has Josh_Receptor_Features and ML_code.
     """
     zip_url = _read_deploy_cfg("DATA_ZIP_URL")
+    if not zip_url:
+        zip_url = _read_deploy_cfg("DATA_DRIVE_FILE_ID")
     current = os.environ.get("GPCR_DATA_ROOT", "").strip()
     if current and _is_manuscript_ready_gpcr_root(Path(current)):
         _apply_gpcr_data_root(Path(current))
