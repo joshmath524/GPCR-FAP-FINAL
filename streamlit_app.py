@@ -1432,12 +1432,12 @@ def render_gpcr_prediction_page():
                             f"**Top Pose Docking Score (kcal/mol):** "
                             f"{float(score):.3f}" if score is not None else "**Top Pose Docking Score (kcal/mol):** N/A"
                         )
-                        gc = dock_result.get("center")
-                        gs = dock_result.get("size")
-                        if gc and gs and len(gc) == 3 and len(gs) == 3:
+                        grid_center = dock_result.get("center")
+                        grid_size = dock_result.get("size")
+                        if grid_center and grid_size and len(grid_center) == 3 and len(grid_size) == 3:
                             st.caption(
-                                f"**Search box used:** center ({float(gc[0]):.3f}, {float(gc[1]):.3f}, {float(gc[2]):.3f}) Å · "
-                                f"size ({float(gs[0]):.3f}, {float(gs[1]):.3f}, {float(gs[2]):.3f}) Å"
+                                f"**Search box used:** center ({float(grid_center[0]):.3f}, {float(grid_center[1]):.3f}, {float(grid_center[2]):.3f}) Å · "
+                                f"size ({float(grid_size[0]):.3f}, {float(grid_size[1]):.3f}, {float(grid_size[2]):.3f}) Å"
                             )
                         contacts = dock_result.get("contact_summary")
                         if contacts:
