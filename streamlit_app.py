@@ -986,9 +986,7 @@ def render_gpcr_prediction_page():
         available_models = list(_ms_regimes[evaluation_regime].keys())
         model_options = [_model_labels[m] for m in ("ensemble", "rf", "lightgbm", "xgboost") if m in available_models]
         default_model_ix = 0
-        if _CLOUD and "Random Forest" in model_options:
-            default_model_ix = model_options.index("Random Forest")
-        elif "Ensemble (stacking)" in model_options:
+        if "Ensemble (stacking)" in model_options:
             default_model_ix = model_options.index("Ensemble (stacking)")
     else:
         model_options = list(_model_labels.values())
@@ -1006,18 +1004,6 @@ def render_gpcr_prediction_page():
 
     if evaluation_regime == "loro" and model_type == "ensemble":
         st.warning("Manuscript stacking ensemble was evaluated on the **independent ligand** split, not LORO.")
-
-    if _CLOUD:
-        st.info(
-            "**Streamlit Cloud (~1 GB RAM):** use **Random Forest** for predictions. "
-            "Ensemble loads three large models and often crashes after the first run. "
-            "Docking is disabled here; run SMINA locally if needed."
-        )
-        if model_type == "ensemble":
-            st.warning(
-                "Ensemble is not recommended on Streamlit Cloud — switch to **Random Forest** "
-                "if the app restarts after predicting."
-            )
 
     seed = 42
     if evaluation_regime and evaluation_regime in _ms_regimes:
@@ -1273,7 +1259,7 @@ def render_gpcr_prediction_page():
                 _render_single_prediction_from_session(last_pred)
 
         last_pred = st.session_state.get("last_single_prediction")
-        if last_pred and not _CLOUD:
+        if last_pred:
             st.divider()
             st.subheader("Docking + receptor-ligand visualization")
             st.caption(
@@ -1421,10 +1407,6 @@ def render_gpcr_prediction_page():
                         st.warning("Docking succeeded, but the 3D viewer payload was empty.")
                 else:
                     st.error(str(dock_result.get("message", "Docking failed.")))
-        elif last_pred and _CLOUD:
-            st.caption(
-                "Docking and the 3D viewer are disabled on Streamlit Cloud to stay within memory limits."
-            )
 
     else:
         uploaded_file = st.file_uploader(
