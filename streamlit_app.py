@@ -235,6 +235,7 @@ from src.gpcr.predict import (
 )
 from src.gpcr.receptor_names import receptor_display_options, resolve_receptor_folder
 from src.gpcr.manuscript_bundle import manuscript_bundle_available, scan_manuscript_artifacts
+from src.gpcr.manuscript_features import manuscript_debug_status
 from src.gpcr.structure_view import py3dmol_available
 from src.gpcr.docking import compute_receptor_grid_params, run_single_receptor_docking
 
@@ -846,6 +847,30 @@ def render_gpcr_prediction_page():
     )
     if _mode == "manuscript":
         st.caption("Install **mordred** for best ligand descriptor parity with enriched training CSVs.")
+        dbg = manuscript_debug_status(HANDOFF_DIR)
+        # Keep a plain stdout line so Streamlit Cloud logs capture this state.
+        print(
+            "[manuscript-debug] "
+            f"gpcr_data_root={dbg['gpcr_data_root']} "
+            f"ml_root={dbg['ml_root']} "
+            f"ml_root_exists={dbg['ml_root_exists']} "
+            f"shared_utilities_imported={dbg['shared_utilities_imported']} "
+            f"manifest_exists={dbg['manifest_exists']} "
+            f"manifest_feature_count={dbg['manifest_feature_count']} "
+            f"ligand_lookup_exists={dbg['ligand_lookup_exists']} "
+            f"ligand_lookup_entries={dbg['ligand_lookup_entries']} "
+            f"ligand_lookup_source={dbg['ligand_lookup_source']}"
+        )
+        with st.sidebar.expander("Manuscript feature diagnostics", expanded=False):
+            st.write(f"GPCR data root: `{dbg['gpcr_data_root']}`")
+            st.write(f"MANUSCRIPT_ML_ROOT: `{dbg['ml_root'] or '(not set)'}`")
+            st.write(f"ML root exists: `{dbg['ml_root_exists']}`")
+            st.write(f"shared_utilities import: `{dbg['shared_utilities_imported']}`")
+            st.write(f"manifest.json exists: `{dbg['manifest_exists']}`")
+            st.write(f"manifest feature count: `{dbg['manifest_feature_count']}`")
+            st.write(f"ligand lookup exists: `{dbg['ligand_lookup_exists']}`")
+            st.write(f"ligand lookup entries: `{dbg['ligand_lookup_entries']}`")
+            st.write(f"ligand lookup source: `{dbg['ligand_lookup_source']}`")
 
     st.divider()
 
@@ -1249,3 +1274,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
