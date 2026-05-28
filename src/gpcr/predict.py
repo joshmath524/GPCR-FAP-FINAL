@@ -461,7 +461,14 @@ class GPCRPredictor:
             try:
                 # Try predict_proba first (for sklearn models)
                 if hasattr(model, 'predict_proba'):
-                    probs = model.predict_proba(X)[0]
+                    raw = model.predict_proba(X)
+                    classes = getattr(model, "classes_", np.array([0, 1, 2]))
+                    if self.feature_mode == "manuscript":
+                        from .manuscript_bundle import _align_proba
+
+                        probs = _align_proba(raw, classes, n_classes=3)[0]
+                    else:
+                        probs = raw[0]
                 # Try predict with probability output (for LightGBM/XGBoost)
                 elif hasattr(model, 'predict'):
                     # Some models return probabilities directly

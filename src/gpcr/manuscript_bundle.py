@@ -81,7 +81,9 @@ class StackingEnsemblePredictor:
             self.lgb_model.predict_proba(X_tree), self.lgb_model.classes_, self.n_classes
         )
         meta_x = np.hstack([p_rf, p_xgb, p_lgb])
-        return self.meta_model.predict_proba(meta_x)
+        meta_probs = self.meta_model.predict_proba(meta_x)
+        meta_classes = getattr(self.meta_model, "classes_", self.classes_)
+        return _align_proba(meta_probs, meta_classes, self.n_classes)
 
 
 def _valid_model_path(path: Path, min_bytes: int = 50_000) -> bool:
