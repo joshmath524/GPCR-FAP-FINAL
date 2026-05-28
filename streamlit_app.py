@@ -5,7 +5,13 @@ Run from this folder (project root):
   streamlit run streamlit_app.py
 """
 import os
+import re
+import shutil
 import sys
+import tempfile
+import urllib.error
+import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -49,25 +55,174 @@ def _resolve_handoff_dir() -> Path:
 HANDOFF_DIR = _resolve_handoff_dir()
 
 
+def _is_valid_gpcr_data_root(path: Path) -> bool:
+    return (path / "Josh_Receptor_Features").is_dir()
+
+
+def _apply_gpcr_data_root(root: Path) -> None:
+    """Set GPCR_DATA_ROOT and MANUSCRIPT_ML_ROOT when layout is recognized."""
+    root = root.resolve()
+    os.environ["GPCR_DATA_ROOT"] = str(root)
+    ml_code = root / "ML_code"
+    if ml_code.is_dir():
+        os.environ["MANUSCRIPT_ML_ROOT"] = str(ml_code.resolve())
+
+
+def _find_gpcr_data_root(base: Path, subdir_hint: str = "") -> Optional[Path]:
+    """Locate folder containing Josh_Receptor_Features under base (or nested one level)."""
+    if subdir_hint:
+        hinted = base / subdir_hint
+        if _is_valid_gpcr_data_root(hinted):
+            return hinted.resolve()
+    if _is_valid_gpcr_data_root(base):
+        return base.resolve()
+    if not base.is_dir():
+        return None
+    for child in sorted(base.iterdir()):
+        if child.is_dir() and _is_valid_gpcr_data_root(child):
+            return child.resolve()
+    return None
+
+
 def _ensure_default_gpcr_data_root() -> None:
     """
     Default **GPCR_DATA_ROOT** to the folder that contains Josh_Receptor_Features (pocket CSVs).
 
     Prefer sibling **GUI_Folder** (training layout) when present; else project-local bundle.
+    Cloud download runs later (after Streamlit import) via _bootstrap_cloud_gpcr_data().
     """
-    if os.environ.get("GPCR_DATA_ROOT", "").strip():
+    existing = os.environ.get("GPCR_DATA_ROOT", "").strip()
+    if existing and _is_valid_gpcr_data_root(Path(existing)):
+        _apply_gpcr_data_root(Path(existing))
         return
     gui = PROJECT_ROOT.parent / "GUI_Folder"
-    if (gui / "Josh_Receptor_Features").is_dir():
-        os.environ["GPCR_DATA_ROOT"] = str(gui.resolve())
+    if _is_valid_gpcr_data_root(gui):
+        _apply_gpcr_data_root(gui)
         return
-    if (PROJECT_ROOT / "Josh_Receptor_Features").is_dir():
-        os.environ["GPCR_DATA_ROOT"] = str(PROJECT_ROOT.resolve())
+    if _is_valid_gpcr_data_root(PROJECT_ROOT):
+        _apply_gpcr_data_root(PROJECT_ROOT)
 
 
 _ensure_default_gpcr_data_root()
 
 import streamlit as st
+
+
+def _read_deploy_cfg(key: str, default: str = "") -> str:
+    """Read Streamlit secret or environment variable."""
+    val = os.environ.get(key, "").strip()
+    if val:
+        return val
+    try:
+        if key in st.secrets:
+            return str(st.secrets[key]).strip()
+    except Exception:
+        pass
+    return default
+
+
+def _download_google_drive(url: str, dest_zip: Path) -> None:
+    """Download a Google Drive file (handles large-file confirm token)."""
+    dest_zip.parent.mkdir(parents=True, exist_ok=True)
+    session_headers = {"User-Agent": "Mozilla/5.0"}
+
+    def _stream_to_file(download_url: str, out_path: Path) -> None:
+        req = urllib.request.Request(download_url, headers=session_headers)
+        with urllib.request.urlopen(req, timeout=600) as resp, open(out_path, "wb") as out:
+            while True:
+                chunk = resp.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+    probe_path = dest_zip.with_suffix(".probe")
+    _stream_to_file(url, probe_path)
+    head = probe_path.read_bytes()[:512]
+    if b"<!DOCTYPE html" in head.lower() or b"<html" in head.lower():
+        text = probe_path.read_text(encoding="utf-8", errors="ignore")
+        probe_path.unlink(missing_ok=True)
+        match = re.search(r"confirm=([0-9A-Za-z_]+)", text)
+        if not match:
+            raise RuntimeError(
+                "Google Drive returned HTML instead of a zip. "
+                "Use a direct-download link (uc?export=download&id=...) or share the file publicly."
+            )
+        sep = "&" if "?" in url else "?"
+        confirm_url = f"{url}{sep}confirm={match.group(1)}"
+        _stream_to_file(confirm_url, dest_zip)
+        return
+    probe_path.replace(dest_zip)
+
+
+def _extract_data_zip(zip_path: Path, extract_dir: Path) -> None:
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_dir)
+
+
+@st.cache_resource(show_spinner=False)
+def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str) -> str:
+    """
+    Download/extract GPCR training data once per Streamlit container.
+    Returns resolved GPCR_DATA_ROOT as a string, or "" on failure.
+    """
+    base = (PROJECT_ROOT / data_dir_name).resolve()
+    marker = base / ".gpcr_data_ready"
+    root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
+    if root and marker.exists():
+        return str(root)
+
+    with tempfile.TemporaryDirectory(prefix="gpcr_zip_") as tmp:
+        zip_path = Path(tmp) / "gpcr_data.zip"
+        _download_google_drive(zip_url, zip_path)
+        if base.exists():
+            shutil.rmtree(base)
+        _extract_data_zip(zip_path, base)
+
+    root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
+    if not root:
+        raise FileNotFoundError(
+            f"Extracted data under {base} but no Josh_Receptor_Features folder found. "
+            "Set DATA_EXTRACTED_SUBDIR in secrets to the folder inside the zip."
+        )
+    marker.write_text(str(root), encoding="utf-8")
+    return str(root)
+
+
+def _bootstrap_cloud_gpcr_data() -> None:
+    """
+    On Streamlit Cloud: download DATA_ZIP_URL, extract, set GPCR_DATA_ROOT / MANUSCRIPT_ML_ROOT.
+    Skipped when a valid local GPCR_DATA_ROOT is already configured.
+    """
+    current = os.environ.get("GPCR_DATA_ROOT", "").strip()
+    if current and _is_valid_gpcr_data_root(Path(current)):
+        _apply_gpcr_data_root(Path(current))
+        return
+
+    zip_url = _read_deploy_cfg("DATA_ZIP_URL")
+    if not zip_url:
+        return
+
+    data_dir_name = _read_deploy_cfg("DATA_DIR", "runtime_data")
+    subdir_hint = _read_deploy_cfg("DATA_EXTRACTED_SUBDIR", "")
+
+    try:
+        with st.status("Downloading GPCR data (first run may take several minutes)...", expanded=True):
+            resolved = _prepare_cloud_gpcr_data(zip_url, data_dir_name, subdir_hint)
+            _apply_gpcr_data_root(Path(resolved))
+            st.write(f"Using **GPCR_DATA_ROOT**: `{resolved}`")
+            ml = os.environ.get("MANUSCRIPT_ML_ROOT", "")
+            if ml:
+                st.write(f"Using **MANUSCRIPT_ML_ROOT**: `{ml}`")
+    except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError) as exc:
+        st.error(f"Could not prepare GPCR data from DATA_ZIP_URL: {exc}")
+        st.info(
+            "Set Streamlit secrets: `DATA_ZIP_URL`, optional `DATA_DIR` (default runtime_data), "
+            "optional `DATA_EXTRACTED_SUBDIR` if the zip has one top-level folder."
+        )
+
+
+_bootstrap_cloud_gpcr_data()
 import pandas as pd
 from rdkit import Chem
 
