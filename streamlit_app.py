@@ -4,7 +4,7 @@ GPCR Class A Functional Activity Prediction Streamlit GUI.
 Run from this folder (project root):
   streamlit run streamlit_app.py
 """
-import gc
+import gc as _gc
 import http.cookiejar
 import os
 import re
@@ -320,7 +320,7 @@ def _extract_data_zip(zip_path: Path, extract_dir: Path) -> None:
         for i, member in enumerate(members):
             zf.extract(member, extract_dir)
             if i % 200 == 0:
-                gc.collect()
+                _gc.collect()
     print(f"[gpcr-data] extracted {len(members)} zip members -> {extract_dir}")
 
 
@@ -359,10 +359,10 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
         zip_path = Path(tmp) / "gpcr_data.zip"
         _download_google_drive(zip_url, zip_path)
         print(f"[gpcr-data] download complete ({zip_path.stat().st_size / 1e9:.2f} GB), extracting...")
-        gc.collect()
+        _gc.collect()
         _extract_data_zip(zip_path, staging)
         print("[gpcr-data] extract complete, merging into runtime_data...")
-        gc.collect()
+        _gc.collect()
 
     root = _find_gpcr_data_root(staging, subdir_hint=subdir_hint)
     if not root:
@@ -1277,7 +1277,7 @@ def render_gpcr_prediction_page():
                     st.session_state.pop("last_docking_result", None)
                     st.error(result.error)
                 if _CLOUD:
-                    gc.collect()
+                    _gc.collect()
             else:
                 st.warning("Please select a GPCR Class A receptor and provide ligand SMILES or upload a structure file.")
 
