@@ -4,6 +4,7 @@ GPCR Class A Functional Activity Prediction Streamlit GUI.
 Run from this folder (project root):
   streamlit run streamlit_app.py
 """
+import gc
 import http.cookiejar
 import os
 import re
@@ -257,9 +258,39 @@ def _download_google_drive(url: str, dest_zip: Path) -> None:
 
 
 def _extract_data_zip(zip_path: Path, extract_dir: Path) -> None:
+    """Extract zip with low RAM use (system unzip on Linux, else one file at a time)."""
     extract_dir.mkdir(parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        import subprocess
+
+        try:
+            subprocess.run(
+                ["unzip", "-q", "-o", str(zip_path), "-d", str(extract_dir)],
+                check=True,
+                timeout=3600,
+            )
+            print(f"[gpcr-data] extracted via unzip -> {extract_dir}")
+            return
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            print(f"[gpcr-data] unzip failed ({exc}), falling back to zipfile")
+
     with zipfile.ZipFile(zip_path, "r") as zf:
-        zf.extractall(extract_dir)
+        members = zf.infolist()
+        for i, member in enumerate(members):
+            zf.extract(member, extract_dir)
+            if i % 200 == 0:
+                gc.collect()
+    print(f"[gpcr-data] extracted {len(members)} zip members -> {extract_dir}")
+
+
+def _merge_extracted_tree(staging: Path, base: Path) -> None:
+    """Move top-level entries from staging into base (replace existing names)."""
+    base.mkdir(parents=True, exist_ok=True)
+    for child in staging.iterdir():
+        dest = base / child.name
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        shutil.move(str(child), str(dest))
 
 
 @st.cache_resource(show_spinner=False)
@@ -271,29 +302,48 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
     base = (PROJECT_ROOT / data_dir_name).resolve()
     marker = base / ".gpcr_data_ready"
     root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
-    if root and marker.exists() and _is_manuscript_ready_gpcr_root(root):
+    if root and _is_manuscript_ready_gpcr_root(root):
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        if not marker.exists():
+            marker.write_text(str(root), encoding="utf-8")
         return str(root)
-    if marker.exists():
-        marker.unlink(missing_ok=True)
 
+    staging = base / "_gpcr_staging"
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    print("[gpcr-data] downloading training zip (first run only)...")
     with tempfile.TemporaryDirectory(prefix="gpcr_zip_") as tmp:
         zip_path = Path(tmp) / "gpcr_data.zip"
         _download_google_drive(zip_url, zip_path)
-        if base.exists():
-            shutil.rmtree(base)
-        _extract_data_zip(zip_path, base)
+        print(f"[gpcr-data] download complete ({zip_path.stat().st_size / 1e9:.2f} GB), extracting...")
+        gc.collect()
+        _extract_data_zip(zip_path, staging)
+        print("[gpcr-data] extract complete, merging into runtime_data...")
+        gc.collect()
 
-    root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
+    root = _find_gpcr_data_root(staging, subdir_hint=subdir_hint)
     if not root:
+        shutil.rmtree(staging, ignore_errors=True)
         raise FileNotFoundError(
-            f"Extracted data under {base} but no Josh_Receptor_Features folder found. "
+            f"Extracted data under {staging} but no Josh_Receptor_Features folder found. "
             "Set DATA_EXTRACTED_SUBDIR in secrets to the folder inside the zip."
         )
     if not _is_manuscript_ready_gpcr_root(root):
+        shutil.rmtree(staging, ignore_errors=True)
         raise FileNotFoundError(
             f"Extracted data at {root} is missing ML_code. "
             "Use the full training zip (GPCRtryagain - Delete - Copy), not pocket CSVs only."
         )
+
+    _merge_extracted_tree(staging, base)
+    shutil.rmtree(staging, ignore_errors=True)
+
+    root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
+    if not root or not _is_manuscript_ready_gpcr_root(root):
+        raise FileNotFoundError(f"Data merge into {base} did not produce a manuscript-ready tree.")
+    marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(str(root), encoding="utf-8")
     return str(root)
 
@@ -309,10 +359,11 @@ def _log_manuscript_debug(prefix: str = "post-bootstrap") -> None:
         print(f"[manuscript-debug:{prefix}] status unavailable: {exc}")
 
 
-def _bootstrap_cloud_gpcr_data() -> None:
+def _bootstrap_cloud_gpcr_data() -> bool:
     """
     On Streamlit Cloud: download DATA_ZIP_URL, extract, set GPCR_DATA_ROOT / MANUSCRIPT_ML_ROOT.
-    Skipped only when the current root already has Josh_Receptor_Features and ML_code.
+    Skipped when the current root already has Josh_Receptor_Features and ML_code.
+    Returns True when manuscript-ready data is available.
     """
     zip_url = _read_deploy_cfg("DATA_ZIP_URL")
     if not zip_url:
@@ -321,16 +372,23 @@ def _bootstrap_cloud_gpcr_data() -> None:
     if current and _is_manuscript_ready_gpcr_root(Path(current)):
         _apply_gpcr_data_root(Path(current))
         _log_manuscript_debug("ready")
-        return
+        return True
 
     if not zip_url:
         if current and _is_valid_gpcr_data_root(Path(current)):
             _apply_gpcr_data_root(Path(current))
         _log_manuscript_debug("no-zip-url")
-        return
+        return _is_manuscript_ready_gpcr_root(Path(os.environ.get("GPCR_DATA_ROOT", ".")))
 
     data_dir_name = _read_deploy_cfg("DATA_DIR", "runtime_data")
     subdir_hint = _read_deploy_cfg("DATA_EXTRACTED_SUBDIR", "")
+
+    if _is_streamlit_cloud():
+        st.warning(
+            "First visit downloads ~2.9 GB and unpacks ~7 GB. Streamlit Cloud free tier (~1 GB RAM) "
+            "may kill the app during unzip. If you see **Oh no**, use a **smaller inference zip** "
+            "(Josh_Receptor_Features + ML_code only) or run locally."
+        )
 
     try:
         with st.status("Downloading GPCR data (first run may take several minutes)...", expanded=True):
@@ -345,17 +403,31 @@ def _bootstrap_cloud_gpcr_data() -> None:
                 st.warning(
                     "Downloaded data has no **ML_code** folder — manuscript predictions will be inaccurate."
                 )
-    except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError) as exc:
+        return True
+    except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError, OSError) as exc:
         st.error(f"Could not prepare GPCR data from DATA_ZIP_URL: {exc}")
         st.info(
             "Set Streamlit secrets: `DATA_ZIP_URL`, optional `DATA_DIR` (default runtime_data), "
-            "optional `DATA_EXTRACTED_SUBDIR` if the zip has one top-level folder."
+            "optional `DATA_EXTRACTED_SUBDIR` if the zip has one top-level folder. "
+            "On Cloud, prefer a slim zip with only **Josh_Receptor_Features** and **ML_code**."
         )
+        return False
 
 
-_bootstrap_cloud_gpcr_data()
 import pandas as pd
 from rdkit import Chem
+
+
+def _is_streamlit_cloud() -> bool:
+    """True on Streamlit Community Cloud (tight ~1 GB RAM)."""
+    if os.environ.get("GPCR_FORCE_CLOUD_MODE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if Path("/mount/src").is_dir():
+        return True
+    return str(os.environ.get("STREAMLIT_RUNTIME_ENVIRONMENT", "")).strip().lower() == "cloud"
+
+
+_CLOUD = _is_streamlit_cloud()
 
 from src.gpcr.predict import (
     predict_single,
@@ -833,6 +905,13 @@ def render_demo_prediction_page():
 
 def render_gpcr_prediction_page():
     """Render the GPCR Ligand Functional Activity Prediction page."""
+    if not _bootstrap_cloud_gpcr_data():
+        st.error(
+            "Training data is not ready. Configure **DATA_DRIVE_FILE_ID** in secrets, "
+            "wait for the first download to finish, or use a smaller inference zip on Streamlit Cloud."
+        )
+        return
+
     st.markdown(
         """
         <div class="hero">
@@ -906,7 +985,11 @@ def render_gpcr_prediction_page():
     if evaluation_regime and _ms_regimes.get(evaluation_regime):
         available_models = list(_ms_regimes[evaluation_regime].keys())
         model_options = [_model_labels[m] for m in ("ensemble", "rf", "lightgbm", "xgboost") if m in available_models]
-        default_model_ix = 0 if "Ensemble (stacking)" in model_options else 0
+        default_model_ix = 0
+        if _CLOUD and "Random Forest" in model_options:
+            default_model_ix = model_options.index("Random Forest")
+        elif "Ensemble (stacking)" in model_options:
+            default_model_ix = model_options.index("Ensemble (stacking)")
     else:
         model_options = list(_model_labels.values())
         default_model_ix = 0
@@ -923,6 +1006,18 @@ def render_gpcr_prediction_page():
 
     if evaluation_regime == "loro" and model_type == "ensemble":
         st.warning("Manuscript stacking ensemble was evaluated on the **independent ligand** split, not LORO.")
+
+    if _CLOUD:
+        st.info(
+            "**Streamlit Cloud (~1 GB RAM):** use **Random Forest** for predictions. "
+            "Ensemble loads three large models and often crashes after the first run. "
+            "Docking is disabled here; run SMINA locally if needed."
+        )
+        if model_type == "ensemble":
+            st.warning(
+                "Ensemble is not recommended on Streamlit Cloud — switch to **Random Forest** "
+                "if the app restarts after predicting."
+            )
 
     seed = 42
     if evaluation_regime and evaluation_regime in _ms_regimes:
@@ -1131,7 +1226,7 @@ def render_gpcr_prediction_page():
                     f"(95% confidence interval: [{ci_lower:.4f}, {ci_upper:.4f}])"
                 )
 
-        if st.button("Predict", type="primary", key="btn_single"):
+        def _run_single_predict() -> None:
             if receptor_selected and ligand_to_use:
                 result = predict_single(
                     receptor_selected,
@@ -1139,7 +1234,6 @@ def render_gpcr_prediction_page():
                     predictor=predictor,
                 )
                 if result.is_valid:
-                    st.success("Valid input")
                     st.session_state["last_single_prediction"] = {
                         "receptor": result.receptor,
                         "canonical_smiles": result.canonical_smiles,
@@ -1155,12 +1249,31 @@ def render_gpcr_prediction_page():
                     st.session_state.pop("last_single_prediction", None)
                     st.session_state.pop("last_docking_result", None)
                     st.error(result.error)
+                if _CLOUD:
+                    gc.collect()
             else:
                 st.warning("Please select a GPCR Class A receptor and provide ligand SMILES or upload a structure file.")
 
+        _predict_fragment = getattr(st, "fragment", None)
+        if _predict_fragment is not None:
+            @_predict_fragment
+            def _single_predict_panel() -> None:
+                if st.button("Predict", type="primary", key="btn_single"):
+                    _run_single_predict()
+                last_pred = st.session_state.get("last_single_prediction")
+                if last_pred:
+                    _render_single_prediction_from_session(last_pred)
+
+            _single_predict_panel()
+        else:
+            if st.button("Predict", type="primary", key="btn_single"):
+                _run_single_predict()
+            last_pred = st.session_state.get("last_single_prediction")
+            if last_pred:
+                _render_single_prediction_from_session(last_pred)
+
         last_pred = st.session_state.get("last_single_prediction")
-        if last_pred:
-            _render_single_prediction_from_session(last_pred)
+        if last_pred and not _CLOUD:
             st.divider()
             st.subheader("Docking + receptor-ligand visualization")
             st.caption(
@@ -1308,6 +1421,10 @@ def render_gpcr_prediction_page():
                         st.warning("Docking succeeded, but the 3D viewer payload was empty.")
                 else:
                     st.error(str(dock_result.get("message", "Docking failed.")))
+        elif last_pred and _CLOUD:
+            st.caption(
+                "Docking and the 3D viewer are disabled on Streamlit Cloud to stay within memory limits."
+            )
 
     else:
         uploaded_file = st.file_uploader(
@@ -1405,4 +1522,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
