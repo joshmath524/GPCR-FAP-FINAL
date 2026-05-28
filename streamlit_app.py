@@ -1,10 +1,10 @@
-"""
+﻿"""
 GPCR Class A Functional Activity Prediction Streamlit GUI.
 
 Run from this folder (project root):
   streamlit run streamlit_app.py
 """
-import gc
+import gc as _gc
 import http.cookiejar
 import os
 import re
@@ -174,6 +174,36 @@ def _stream_url_to_file(opener: urllib.request.OpenerDirector, download_url: str
             out.write(chunk)
 
 
+def _gdown_download_file(file_id: str, dest_zip: Path) -> None:
+    """gdown 4.x–6.x compatible (no fuzzy= — removed in gdown 6)."""
+    import gdown
+
+    dest = str(dest_zip)
+    uc_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    last_error: Optional[Exception] = None
+
+    def _try(fn) -> bool:
+        nonlocal last_error
+        try:
+            fn()
+            if _looks_like_zip_file(dest_zip):
+                return True
+            dest_zip.unlink(missing_ok=True)
+        except Exception as exc:
+            last_error = exc
+            dest_zip.unlink(missing_ok=True)
+        return False
+
+    # gdown 6: avoid /file/d/.../view URLs (they trigger removed fuzzy= internally).
+    if _try(lambda: gdown.download(id=file_id, output=dest, quiet=False)):
+        return
+    if _try(lambda: gdown.download(uc_url, dest, quiet=False)):
+        return
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("gdown did not produce a zip file")
+
 def _download_google_drive_with_cookies(download_url: str, dest_zip: Path) -> None:
     """urllib + cookies fallback (large Drive files need confirm token)."""
     cookie_jar = http.cookiejar.CookieJar()
@@ -279,7 +309,7 @@ def _extract_data_zip(zip_path: Path, extract_dir: Path) -> None:
         for i, member in enumerate(members):
             zf.extract(member, extract_dir)
             if i % 200 == 0:
-                gc.collect()
+                _gc.collect()
     print(f"[gpcr-data] extracted {len(members)} zip members -> {extract_dir}")
 
 
@@ -318,10 +348,10 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
         zip_path = Path(tmp) / "gpcr_data.zip"
         _download_google_drive(zip_url, zip_path)
         print(f"[gpcr-data] download complete ({zip_path.stat().st_size / 1e9:.2f} GB), extracting...")
-        gc.collect()
+        _gc.collect()
         _extract_data_zip(zip_path, staging)
         print("[gpcr-data] extract complete, merging into runtime_data...")
-        gc.collect()
+        _gc.collect()
 
     root = _find_gpcr_data_root(staging, subdir_hint=subdir_hint)
     if not root:
@@ -590,22 +620,39 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PREDICTOR (cached)
+# PREDICTOR (single in-memory slot — avoids OOM on Streamlit Cloud)
 # ============================================================================
 
-@st.cache_resource
-def get_predictor(
+def load_active_predictor(
     model_type: Optional[str] = None,
     evaluation_regime: Optional[str] = None,
     seed: int = 42,
 ):
-    """Load predictor (manuscript regimes or legacy demo bundle)."""
-    return load_predictor(
-        HANDOFF_DIR,
-        model_type=model_type,
-        evaluation_regime=evaluation_regime,
-        seed=seed,
-    )
+    """
+    Load at most one predictor per session.
+
+    ``@st.cache_resource`` kept every model type in RAM after a dropdown change;
+    ensemble + RF together exceeds Streamlit Cloud's ~1 GiB limit.
+    """
+    key = (evaluation_regime or "", model_type or "", int(seed))
+    cached = st.session_state.get("_active_predictor")
+    if st.session_state.get("_predictor_key") == key and cached is not None:
+        return cached
+
+    st.session_state.pop("_active_predictor", None)
+    _gc.collect()
+
+    label = (model_type or "rf").replace("_", " ").title()
+    with st.spinner(f"Loading {label} model…"):
+        predictor = load_predictor(
+            HANDOFF_DIR,
+            model_type=model_type,
+            evaluation_regime=evaluation_regime,
+            seed=seed,
+        )
+    st.session_state["_predictor_key"] = key
+    st.session_state["_active_predictor"] = predictor
+    return predictor
 
 # ============================================================================
 # PAGES
@@ -844,7 +891,7 @@ def render_demo_prediction_page():
     model_type = model_type_map[model_type_label]
 
     try:
-        predictor = get_predictor(model_type)
+        predictor = load_active_predictor(model_type)
     except Exception as e:
         st.error(f"Could not load {model_type_label} model: {e}")
         st.info(
@@ -984,10 +1031,9 @@ def render_gpcr_prediction_page():
 
     if evaluation_regime and _ms_regimes.get(evaluation_regime):
         available_models = list(_ms_regimes[evaluation_regime].keys())
-        model_options = [_model_labels[m] for m in ("ensemble", "rf", "lightgbm", "xgboost") if m in available_models]
+        # RF first (default) — ensemble loads RF+XGB+LGB+meta and often OOMs on Cloud.
+        model_options = [_model_labels[m] for m in ("rf", "lightgbm", "xgboost", "ensemble") if m in available_models]
         default_model_ix = 0
-        if "Ensemble (stacking)" in model_options:
-            default_model_ix = model_options.index("Ensemble (stacking)")
     else:
         model_options = list(_model_labels.values())
         default_model_ix = 0
@@ -1026,7 +1072,7 @@ def render_gpcr_prediction_page():
         return
 
     try:
-        predictor = get_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
+        predictor = load_active_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
     except Exception as e:
         st.error(f"Could not load {model_type_label} model: {e}")
         if evaluation_regime:
@@ -1236,7 +1282,7 @@ def render_gpcr_prediction_page():
                     st.session_state.pop("last_docking_result", None)
                     st.error(result.error)
                 if _CLOUD:
-                    gc.collect()
+                    _gc.collect()
             else:
                 st.warning("Please select a GPCR Class A receptor and provide ligand SMILES or upload a structure file.")
 
@@ -1391,12 +1437,12 @@ def render_gpcr_prediction_page():
                             f"**Top Pose Docking Score (kcal/mol):** "
                             f"{float(score):.3f}" if score is not None else "**Top Pose Docking Score (kcal/mol):** N/A"
                         )
-                        gc = dock_result.get("center")
-                        gs = dock_result.get("size")
-                        if gc and gs and len(gc) == 3 and len(gs) == 3:
+                        grid_center = dock_result.get("center")
+                        grid_size = dock_result.get("size")
+                        if grid_center and grid_size and len(grid_center) == 3 and len(grid_size) == 3:
                             st.caption(
-                                f"**Search box used:** center ({float(gc[0]):.3f}, {float(gc[1]):.3f}, {float(gc[2]):.3f}) Å · "
-                                f"size ({float(gs[0]):.3f}, {float(gs[1]):.3f}, {float(gs[2]):.3f}) Å"
+                                f"**Search box used:** center ({float(grid_center[0]):.3f}, {float(grid_center[1]):.3f}, {float(grid_center[2]):.3f}) Å · "
+                                f"size ({float(grid_size[0]):.3f}, {float(grid_size[1]):.3f}, {float(grid_size[2]):.3f}) Å"
                             )
                         contacts = dock_result.get("contact_summary")
                         if contacts:
