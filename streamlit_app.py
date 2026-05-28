@@ -144,15 +144,12 @@ def _google_drive_file_id(url: str) -> str:
     raise ValueError(f"Could not parse Google Drive file id from: {url}")
 
 
-def _resolve_google_drive_file_id(url_or_id: str) -> str:
+def _google_drive_download_url(url_or_id: str) -> str:
     raw = url_or_id.strip()
     if raw.startswith("http"):
-        return _google_drive_file_id(raw)
-    return raw
-
-
-def _google_drive_download_url(url_or_id: str) -> str:
-    file_id = _resolve_google_drive_file_id(url_or_id)
+        file_id = _google_drive_file_id(raw)
+    else:
+        file_id = raw
     return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 
@@ -174,43 +171,6 @@ def _stream_url_to_file(opener: urllib.request.OpenerDirector, download_url: str
             if not chunk:
                 break
             out.write(chunk)
-
-
-def _gdown_download_file(file_id: str, dest_zip: Path) -> None:
-    """gdown 4.x–6.x compatible (no fuzzy= — removed in gdown 6)."""
-    import gdown
-
-    uc_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    share_url = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
-    last_error: Optional[Exception] = None
-
-    for kwargs in (
-        {"id": file_id, "output": str(dest_zip), "quiet": False},
-        {"url": uc_url, "output": str(dest_zip), "quiet": False},
-        {"url": share_url, "output": str(dest_zip), "quiet": False},
-    ):
-        try:
-            gdown.download(**kwargs)
-            if _looks_like_zip_file(dest_zip):
-                return
-            dest_zip.unlink(missing_ok=True)
-        except TypeError as exc:
-            last_error = exc
-            try:
-                gdown.download(uc_url, str(dest_zip), quiet=False)
-                if _looks_like_zip_file(dest_zip):
-                    return
-                dest_zip.unlink(missing_ok=True)
-            except Exception as exc2:
-                last_error = exc2
-                dest_zip.unlink(missing_ok=True)
-        except Exception as exc:
-            last_error = exc
-            dest_zip.unlink(missing_ok=True)
-
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("gdown did not produce a zip file")
 
 
 def _download_google_drive_with_cookies(download_url: str, dest_zip: Path) -> None:
@@ -262,37 +222,36 @@ def _download_google_drive_with_cookies(download_url: str, dest_zip: Path) -> No
 def _download_google_drive(url: str, dest_zip: Path) -> None:
     """Download a Google Drive file (large zip: virus-scan confirm handled)."""
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
-    file_id = _resolve_google_drive_file_id(url)
-    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    usercontent_url = (
-        f"https://drive.usercontent.google.com/download?id={file_id}"
-        "&export=download&confirm=t"
-    )
+    download_url = _google_drive_download_url(url)
     errors: list[str] = []
 
     try:
-        _gdown_download_file(file_id, dest_zip)
-        return
+        import gdown
+
+        gdown.download(download_url, str(dest_zip), quiet=False, fuzzy=True)
+        if _looks_like_zip_file(dest_zip):
+            return
+        errors.append("gdown saved a non-zip response")
+        dest_zip.unlink(missing_ok=True)
     except ImportError:
         errors.append("gdown not installed")
     except Exception as exc:
         errors.append(f"gdown: {exc}")
         dest_zip.unlink(missing_ok=True)
 
-    for cookie_url in (usercontent_url, download_url):
-        try:
-            _download_google_drive_with_cookies(cookie_url, dest_zip)
-            if _looks_like_zip_file(dest_zip):
-                return
-            errors.append(f"cookie download from {cookie_url[:48]}... saved HTML or tiny file")
-            dest_zip.unlink(missing_ok=True)
-        except Exception as exc:
-            errors.append(f"urllib: {exc}")
-            dest_zip.unlink(missing_ok=True)
+    try:
+        _download_google_drive_with_cookies(download_url, dest_zip)
+        if _looks_like_zip_file(dest_zip):
+            return
+        errors.append("cookie downloader saved HTML or a tiny file")
+        dest_zip.unlink(missing_ok=True)
+    except Exception as exc:
+        errors.append(f"urllib: {exc}")
+        dest_zip.unlink(missing_ok=True)
 
     raise RuntimeError(
         "Google Drive download failed. Share the zip as **Anyone with the link → Viewer**, "
-        "then set secrets to DATA_DRIVE_FILE_ID or DATA_ZIP_URL. "
+        "then set secrets to either full DATA_ZIP_URL or DATA_DRIVE_FILE_ID only. "
         f"Details: {'; '.join(errors)}"
     )
 
@@ -1446,3 +1405,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
