@@ -4,8 +4,6 @@ GPCR Class A Functional Activity Prediction Streamlit GUI.
 Run from this folder (project root):
   streamlit run streamlit_app.py
 """
-import gc as _gc
-import http.cookiejar
 import os
 import re
 import shutil
@@ -131,207 +129,43 @@ def _read_deploy_cfg(key: str, default: str = "") -> str:
     return default
 
 
-def _google_drive_file_id(url: str) -> str:
-    """Parse file id from common Google Drive share / uc URLs."""
-    url = url.strip()
-    for pattern in (
-        r"[?&]id=([a-zA-Z0-9_-]+)",
-        r"/file/d/([a-zA-Z0-9_-]+)",
-        r"/open\?id=([a-zA-Z0-9_-]+)",
-    ):
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    raise ValueError(f"Could not parse Google Drive file id from: {url}")
-
-
-def _resolve_google_drive_file_id(url_or_id: str) -> str:
-    raw = url_or_id.strip()
-    if raw.startswith("http"):
-        return _google_drive_file_id(raw)
-    return raw
-
-
-def _google_drive_download_url(url_or_id: str) -> str:
-    file_id = _resolve_google_drive_file_id(url_or_id)
-    return f"https://drive.google.com/uc?export=download&id={file_id}"
-
-
-def _looks_like_zip_file(path: Path) -> bool:
-    if not path.is_file() or path.stat().st_size < 4:
-        return False
-    with open(path, "rb") as fh:
-        head = fh.read(512)
-    lower = head.lower()
-    if b"<html" in lower or b"<!doctype" in lower:
-        return False
-    return head[:2] == b"PK" or path.stat().st_size > 50_000_000
-
-
-def _stream_url_to_file(opener: urllib.request.OpenerDirector, download_url: str, dest: Path) -> None:
-    with opener.open(download_url, timeout=3600) as resp, open(dest, "wb") as out:
-        while True:
-            chunk = resp.read(8 * 1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-
-
-def _gdown_download_file(file_id: str, dest_zip: Path) -> None:
-    """gdown 4.x–6.x compatible (no fuzzy= — removed in gdown 6)."""
-    import gdown
-
-    uc_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    share_url = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
-    last_error: Optional[Exception] = None
-
-    for kwargs in (
-        {"id": file_id, "output": str(dest_zip), "quiet": False},
-        {"url": uc_url, "output": str(dest_zip), "quiet": False},
-        {"url": share_url, "output": str(dest_zip), "quiet": False},
-    ):
-        try:
-            gdown.download(**kwargs)
-            if _looks_like_zip_file(dest_zip):
-                return
-            dest_zip.unlink(missing_ok=True)
-        except TypeError as exc:
-            last_error = exc
-            try:
-                gdown.download(uc_url, str(dest_zip), quiet=False)
-                if _looks_like_zip_file(dest_zip):
-                    return
-                dest_zip.unlink(missing_ok=True)
-            except Exception as exc2:
-                last_error = exc2
-                dest_zip.unlink(missing_ok=True)
-        except Exception as exc:
-            last_error = exc
-            dest_zip.unlink(missing_ok=True)
-
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("gdown did not produce a zip file")
-
-
-def _download_google_drive_with_cookies(download_url: str, dest_zip: Path) -> None:
-    """urllib + cookies fallback (large Drive files need confirm token)."""
-    cookie_jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-    opener.addheaders = [("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")]
-
-    resp = opener.open(download_url, timeout=3600)
-    peek = resp.read(65536)
-
-    confirm: Optional[str] = None
-    for cookie in cookie_jar:
-        if cookie.name.startswith("download_warning"):
-            confirm = cookie.value
-            break
-
-    text = peek.decode("utf-8", errors="ignore")
-    needs_confirm = b"<html" in peek.lower() or "virus scan" in text.lower()
-    if confirm is None and needs_confirm:
-        for pattern in (
-            r"confirm=([0-9A-Za-z_-]+)",
-            r"uuid=([0-9a-fA-F-]{36})",
-        ):
-            match = re.search(pattern, text)
-            if match:
-                confirm = match.group(1)
-                break
-        if confirm is None:
-            confirm = "t"
-
-    if confirm:
-        resp.close()
-        sep = "&" if "?" in download_url else "?"
-        final_url = f"{download_url}{sep}confirm={confirm}"
-        _stream_url_to_file(opener, final_url, dest_zip)
-        return
-
-    with open(dest_zip, "wb") as out:
-        out.write(peek)
-        while True:
-            chunk = resp.read(8 * 1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-    resp.close()
-
-
 def _download_google_drive(url: str, dest_zip: Path) -> None:
-    """Download a Google Drive file (large zip: virus-scan confirm handled)."""
+    """Download a Google Drive file (handles large-file confirm token)."""
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
-    file_id = _resolve_google_drive_file_id(url)
-    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    usercontent_url = (
-        f"https://drive.usercontent.google.com/download?id={file_id}"
-        "&export=download&confirm=t"
-    )
-    errors: list[str] = []
+    session_headers = {"User-Agent": "Mozilla/5.0"}
 
-    try:
-        _gdown_download_file(file_id, dest_zip)
+    def _stream_to_file(download_url: str, out_path: Path) -> None:
+        req = urllib.request.Request(download_url, headers=session_headers)
+        with urllib.request.urlopen(req, timeout=600) as resp, open(out_path, "wb") as out:
+            while True:
+                chunk = resp.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+    probe_path = dest_zip.with_suffix(".probe")
+    _stream_to_file(url, probe_path)
+    head = probe_path.read_bytes()[:512]
+    if b"<!DOCTYPE html" in head.lower() or b"<html" in head.lower():
+        text = probe_path.read_text(encoding="utf-8", errors="ignore")
+        probe_path.unlink(missing_ok=True)
+        match = re.search(r"confirm=([0-9A-Za-z_]+)", text)
+        if not match:
+            raise RuntimeError(
+                "Google Drive returned HTML instead of a zip. "
+                "Use a direct-download link (uc?export=download&id=...) or share the file publicly."
+            )
+        sep = "&" if "?" in url else "?"
+        confirm_url = f"{url}{sep}confirm={match.group(1)}"
+        _stream_to_file(confirm_url, dest_zip)
         return
-    except ImportError:
-        errors.append("gdown not installed")
-    except Exception as exc:
-        errors.append(f"gdown: {exc}")
-        dest_zip.unlink(missing_ok=True)
-
-    for cookie_url in (usercontent_url, download_url):
-        try:
-            _download_google_drive_with_cookies(cookie_url, dest_zip)
-            if _looks_like_zip_file(dest_zip):
-                return
-            errors.append(f"cookie download from {cookie_url[:48]}... saved HTML or tiny file")
-            dest_zip.unlink(missing_ok=True)
-        except Exception as exc:
-            errors.append(f"urllib: {exc}")
-            dest_zip.unlink(missing_ok=True)
-
-    raise RuntimeError(
-        "Google Drive download failed. Share the zip as **Anyone with the link → Viewer**, "
-        "then set secrets to DATA_DRIVE_FILE_ID or DATA_ZIP_URL. "
-        f"Details: {'; '.join(errors)}"
-    )
+    probe_path.replace(dest_zip)
 
 
 def _extract_data_zip(zip_path: Path, extract_dir: Path) -> None:
-    """Extract zip with low RAM use (system unzip on Linux, else one file at a time)."""
     extract_dir.mkdir(parents=True, exist_ok=True)
-    if sys.platform != "win32":
-        import subprocess
-
-        try:
-            subprocess.run(
-                ["unzip", "-q", "-o", str(zip_path), "-d", str(extract_dir)],
-                check=True,
-                timeout=3600,
-            )
-            print(f"[gpcr-data] extracted via unzip -> {extract_dir}")
-            return
-        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            print(f"[gpcr-data] unzip failed ({exc}), falling back to zipfile")
-
     with zipfile.ZipFile(zip_path, "r") as zf:
-        members = zf.infolist()
-        for i, member in enumerate(members):
-            zf.extract(member, extract_dir)
-            if i % 200 == 0:
-                _gc.collect()
-    print(f"[gpcr-data] extracted {len(members)} zip members -> {extract_dir}")
-
-
-def _merge_extracted_tree(staging: Path, base: Path) -> None:
-    """Move top-level entries from staging into base (replace existing names)."""
-    base.mkdir(parents=True, exist_ok=True)
-    for child in staging.iterdir():
-        dest = base / child.name
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        shutil.move(str(child), str(dest))
+        zf.extractall(extract_dir)
 
 
 @st.cache_resource(show_spinner=False)
@@ -343,48 +177,29 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
     base = (PROJECT_ROOT / data_dir_name).resolve()
     marker = base / ".gpcr_data_ready"
     root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
-    if root and _is_manuscript_ready_gpcr_root(root):
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        if not marker.exists():
-            marker.write_text(str(root), encoding="utf-8")
+    if root and marker.exists() and _is_manuscript_ready_gpcr_root(root):
         return str(root)
+    if marker.exists():
+        marker.unlink(missing_ok=True)
 
-    staging = base / "_gpcr_staging"
-    if staging.exists():
-        shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
-
-    print("[gpcr-data] downloading training zip (first run only)...")
     with tempfile.TemporaryDirectory(prefix="gpcr_zip_") as tmp:
         zip_path = Path(tmp) / "gpcr_data.zip"
         _download_google_drive(zip_url, zip_path)
-        print(f"[gpcr-data] download complete ({zip_path.stat().st_size / 1e9:.2f} GB), extracting...")
-        _gc.collect()
-        _extract_data_zip(zip_path, staging)
-        print("[gpcr-data] extract complete, merging into runtime_data...")
-        _gc.collect()
+        if base.exists():
+            shutil.rmtree(base)
+        _extract_data_zip(zip_path, base)
 
-    root = _find_gpcr_data_root(staging, subdir_hint=subdir_hint)
+    root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
     if not root:
-        shutil.rmtree(staging, ignore_errors=True)
         raise FileNotFoundError(
-            f"Extracted data under {staging} but no Josh_Receptor_Features folder found. "
+            f"Extracted data under {base} but no Josh_Receptor_Features folder found. "
             "Set DATA_EXTRACTED_SUBDIR in secrets to the folder inside the zip."
         )
     if not _is_manuscript_ready_gpcr_root(root):
-        shutil.rmtree(staging, ignore_errors=True)
         raise FileNotFoundError(
             f"Extracted data at {root} is missing ML_code. "
             "Use the full training zip (GPCRtryagain - Delete - Copy), not pocket CSVs only."
         )
-
-    _merge_extracted_tree(staging, base)
-    shutil.rmtree(staging, ignore_errors=True)
-
-    root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
-    if not root or not _is_manuscript_ready_gpcr_root(root):
-        raise FileNotFoundError(f"Data merge into {base} did not produce a manuscript-ready tree.")
-    marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(str(root), encoding="utf-8")
     return str(root)
 
@@ -400,36 +215,26 @@ def _log_manuscript_debug(prefix: str = "post-bootstrap") -> None:
         print(f"[manuscript-debug:{prefix}] status unavailable: {exc}")
 
 
-def _bootstrap_cloud_gpcr_data() -> bool:
+def _bootstrap_cloud_gpcr_data() -> None:
     """
     On Streamlit Cloud: download DATA_ZIP_URL, extract, set GPCR_DATA_ROOT / MANUSCRIPT_ML_ROOT.
-    Skipped when the current root already has Josh_Receptor_Features and ML_code.
-    Returns True when manuscript-ready data is available.
+    Skipped only when the current root already has Josh_Receptor_Features and ML_code.
     """
     zip_url = _read_deploy_cfg("DATA_ZIP_URL")
-    if not zip_url:
-        zip_url = _read_deploy_cfg("DATA_DRIVE_FILE_ID")
     current = os.environ.get("GPCR_DATA_ROOT", "").strip()
     if current and _is_manuscript_ready_gpcr_root(Path(current)):
         _apply_gpcr_data_root(Path(current))
         _log_manuscript_debug("ready")
-        return True
+        return
 
     if not zip_url:
         if current and _is_valid_gpcr_data_root(Path(current)):
             _apply_gpcr_data_root(Path(current))
         _log_manuscript_debug("no-zip-url")
-        return _is_manuscript_ready_gpcr_root(Path(os.environ.get("GPCR_DATA_ROOT", ".")))
+        return
 
     data_dir_name = _read_deploy_cfg("DATA_DIR", "runtime_data")
     subdir_hint = _read_deploy_cfg("DATA_EXTRACTED_SUBDIR", "")
-
-    if _is_streamlit_cloud():
-        st.warning(
-            "First visit downloads ~2.9 GB and unpacks ~7 GB. Streamlit Cloud free tier (~1 GB RAM) "
-            "may kill the app during unzip. If you see **Oh no**, use a **smaller inference zip** "
-            "(Josh_Receptor_Features + ML_code only) or run locally."
-        )
 
     try:
         with st.status("Downloading GPCR data (first run may take several minutes)...", expanded=True):
@@ -444,31 +249,17 @@ def _bootstrap_cloud_gpcr_data() -> bool:
                 st.warning(
                     "Downloaded data has no **ML_code** folder — manuscript predictions will be inaccurate."
                 )
-        return True
-    except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError, OSError) as exc:
+    except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError) as exc:
         st.error(f"Could not prepare GPCR data from DATA_ZIP_URL: {exc}")
         st.info(
             "Set Streamlit secrets: `DATA_ZIP_URL`, optional `DATA_DIR` (default runtime_data), "
-            "optional `DATA_EXTRACTED_SUBDIR` if the zip has one top-level folder. "
-            "On Cloud, prefer a slim zip with only **Josh_Receptor_Features** and **ML_code**."
+            "optional `DATA_EXTRACTED_SUBDIR` if the zip has one top-level folder."
         )
-        return False
 
 
+_bootstrap_cloud_gpcr_data()
 import pandas as pd
 from rdkit import Chem
-
-
-def _is_streamlit_cloud() -> bool:
-    """True on Streamlit Community Cloud (tight ~1 GB RAM)."""
-    if os.environ.get("GPCR_FORCE_CLOUD_MODE", "").strip().lower() in ("1", "true", "yes"):
-        return True
-    if Path("/mount/src").is_dir():
-        return True
-    return str(os.environ.get("STREAMLIT_RUNTIME_ENVIRONMENT", "")).strip().lower() == "cloud"
-
-
-_CLOUD = _is_streamlit_cloud()
 
 from src.gpcr.predict import (
     predict_single,
@@ -631,39 +422,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================================
-# PREDICTOR (single in-memory slot — avoids OOM on Streamlit Cloud)
+# PREDICTOR (cached)
 # ============================================================================
 
-def load_active_predictor(
+@st.cache_resource
+def get_predictor(
     model_type: Optional[str] = None,
     evaluation_regime: Optional[str] = None,
     seed: int = 42,
 ):
-    """
-    Load at most one predictor per session.
-
-    ``@st.cache_resource`` kept every model type in RAM after a dropdown change;
-    ensemble + RF together exceeds Streamlit Cloud's ~1 GiB limit.
-    """
-    key = (evaluation_regime or "", model_type or "", int(seed))
-    cached = st.session_state.get("_active_predictor")
-    if st.session_state.get("_predictor_key") == key and cached is not None:
-        return cached
-
-    st.session_state.pop("_active_predictor", None)
-    _gc.collect()
-
-    label = (model_type or "rf").replace("_", " ").title()
-    with st.spinner(f"Loading {label} model…"):
-        predictor = load_predictor(
-            HANDOFF_DIR,
-            model_type=model_type,
-            evaluation_regime=evaluation_regime,
-            seed=seed,
-        )
-    st.session_state["_predictor_key"] = key
-    st.session_state["_active_predictor"] = predictor
-    return predictor
+    """Load predictor (manuscript regimes or legacy demo bundle)."""
+    return load_predictor(
+        HANDOFF_DIR,
+        model_type=model_type,
+        evaluation_regime=evaluation_regime,
+        seed=seed,
+    )
 
 # ============================================================================
 # PAGES
@@ -902,7 +676,7 @@ def render_demo_prediction_page():
     model_type = model_type_map[model_type_label]
 
     try:
-        predictor = load_active_predictor(model_type)
+        predictor = get_predictor(model_type)
     except Exception as e:
         st.error(f"Could not load {model_type_label} model: {e}")
         st.info(
@@ -963,13 +737,6 @@ def render_demo_prediction_page():
 
 def render_gpcr_prediction_page():
     """Render the GPCR Ligand Functional Activity Prediction page."""
-    if not _bootstrap_cloud_gpcr_data():
-        st.error(
-            "Training data is not ready. Configure **DATA_DRIVE_FILE_ID** in secrets, "
-            "wait for the first download to finish, or use a smaller inference zip on Streamlit Cloud."
-        )
-        return
-
     st.markdown(
         """
         <div class="hero">
@@ -1042,9 +809,8 @@ def render_gpcr_prediction_page():
 
     if evaluation_regime and _ms_regimes.get(evaluation_regime):
         available_models = list(_ms_regimes[evaluation_regime].keys())
-        # RF first (default) — ensemble loads RF+XGB+LGB+meta and often OOMs on Cloud.
-        model_options = [_model_labels[m] for m in ("rf", "lightgbm", "xgboost", "ensemble") if m in available_models]
-        default_model_ix = 0
+        model_options = [_model_labels[m] for m in ("ensemble", "rf", "lightgbm", "xgboost") if m in available_models]
+        default_model_ix = 0 if "Ensemble (stacking)" in model_options else 0
     else:
         model_options = list(_model_labels.values())
         default_model_ix = 0
@@ -1083,7 +849,7 @@ def render_gpcr_prediction_page():
         return
 
     try:
-        predictor = load_active_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
+        predictor = get_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
     except Exception as e:
         st.error(f"Could not load {model_type_label} model: {e}")
         if evaluation_regime:
@@ -1269,7 +1035,7 @@ def render_gpcr_prediction_page():
                     f"(95% confidence interval: [{ci_lower:.4f}, {ci_upper:.4f}])"
                 )
 
-        def _run_single_predict() -> None:
+        if st.button("Predict", type="primary", key="btn_single"):
             if receptor_selected and ligand_to_use:
                 result = predict_single(
                     receptor_selected,
@@ -1277,6 +1043,7 @@ def render_gpcr_prediction_page():
                     predictor=predictor,
                 )
                 if result.is_valid:
+                    st.success("Valid input")
                     st.session_state["last_single_prediction"] = {
                         "receptor": result.receptor,
                         "canonical_smiles": result.canonical_smiles,
@@ -1292,31 +1059,12 @@ def render_gpcr_prediction_page():
                     st.session_state.pop("last_single_prediction", None)
                     st.session_state.pop("last_docking_result", None)
                     st.error(result.error)
-                if _CLOUD:
-                    _gc.collect()
             else:
                 st.warning("Please select a GPCR Class A receptor and provide ligand SMILES or upload a structure file.")
 
-        _predict_fragment = getattr(st, "fragment", None)
-        if _predict_fragment is not None:
-            @_predict_fragment
-            def _single_predict_panel() -> None:
-                if st.button("Predict", type="primary", key="btn_single"):
-                    _run_single_predict()
-                last_pred = st.session_state.get("last_single_prediction")
-                if last_pred:
-                    _render_single_prediction_from_session(last_pred)
-
-            _single_predict_panel()
-        else:
-            if st.button("Predict", type="primary", key="btn_single"):
-                _run_single_predict()
-            last_pred = st.session_state.get("last_single_prediction")
-            if last_pred:
-                _render_single_prediction_from_session(last_pred)
-
         last_pred = st.session_state.get("last_single_prediction")
         if last_pred:
+            _render_single_prediction_from_session(last_pred)
             st.divider()
             st.subheader("Docking + receptor-ligand visualization")
             st.caption(
@@ -1448,12 +1196,12 @@ def render_gpcr_prediction_page():
                             f"**Top Pose Docking Score (kcal/mol):** "
                             f"{float(score):.3f}" if score is not None else "**Top Pose Docking Score (kcal/mol):** N/A"
                         )
-                        grid_center = dock_result.get("center")
-                        grid_size = dock_result.get("size")
-                        if grid_center and grid_size and len(grid_center) == 3 and len(grid_size) == 3:
+                        gc = dock_result.get("center")
+                        gs = dock_result.get("size")
+                        if gc and gs and len(gc) == 3 and len(gs) == 3:
                             st.caption(
-                                f"**Search box used:** center ({float(grid_center[0]):.3f}, {float(grid_center[1]):.3f}, {float(grid_center[2]):.3f}) Å · "
-                                f"size ({float(grid_size[0]):.3f}, {float(grid_size[1]):.3f}, {float(grid_size[2]):.3f}) Å"
+                                f"**Search box used:** center ({float(gc[0]):.3f}, {float(gc[1]):.3f}, {float(gc[2]):.3f}) Å · "
+                                f"size ({float(gs[0]):.3f}, {float(gs[1]):.3f}, {float(gs[2]):.3f}) Å"
                             )
                         contacts = dock_result.get("contact_summary")
                         if contacts:
