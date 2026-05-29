@@ -66,6 +66,22 @@ def _is_manuscript_ready_gpcr_root(path: Path) -> bool:
     return _is_valid_gpcr_data_root(path) and (path / "ML_code").is_dir()
 
 
+def _bundled_ligand_lookup_path() -> Path:
+    return HANDOFF_DIR / "artifacts" / "manuscript" / "ligand_feature_lookup.joblib"
+
+
+def _has_bundled_ligand_lookup() -> bool:
+    p = _bundled_ligand_lookup_path()
+    return p.is_file() and p.stat().st_size > 1_000_000
+
+
+def _is_inference_ready_gpcr_root(path: Path) -> bool:
+    """Pockets + ML_code, or pockets + bundled ligand lookup (no per-receptor xlsx on disk)."""
+    if _is_manuscript_ready_gpcr_root(path):
+        return True
+    return _is_valid_gpcr_data_root(path) and _has_bundled_ligand_lookup()
+
+
 def _apply_gpcr_data_root(root: Path) -> None:
     """Set GPCR_DATA_ROOT and MANUSCRIPT_ML_ROOT when layout is recognized."""
     root = root.resolve()
@@ -443,38 +459,9 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
     return str(root)
 
 
-
-
-def _render_cloud_data_health(project_root: Path, *, expanded: bool = False) -> dict:
-    """Surface why Cloud predictions may differ from local (missing workbooks, etc.)."""
-    health = manuscript_data_health(project_root)
-    if health["prediction_ready"]:
-        return health
-    with st.expander("Data setup issue (predictions may be wrong)", expanded=expanded):
-        st.warning(
-            "Manuscript models need **per-receptor *_NEW.xlsx** workbooks (or "
-            "`artifacts/manuscript/ligand_feature_lookup.joblib`) under **GPCR_DATA_ROOT**, "
-            "not only **Josh_Receptor_Features** + **ML_code**."
-        )
-        for issue in health.get("issues") or []:
-            st.markdown(f"- {issue}")
-        sample = ", ".join(health["receptors_with_workbooks"][:8]) or "none"
-        st.markdown(
-            f"- Receptors with workbooks found: **{health['receptor_workbook_count']}** ({sample})"
-        )
-        st.markdown(
-            "- Fix: include `beta2/beta2_agonist_enriched_NEW.xlsx` (and other receptors) in the Drive zip, "
-            "or run `scripts/build_manuscript_ligand_lookup.py` locally and commit the `.joblib`."
-        )
-    return health
-
 def _log_manuscript_debug(prefix: str = "post-bootstrap") -> None:
     try:
-        from src.gpcr.manuscript_features import (
-    inference_feature_summary,
-    manuscript_data_health,
-    manuscript_debug_status,
-)
+        from src.gpcr.manuscript_features import manuscript_debug_status
 
         dbg = manuscript_debug_status(PROJECT_ROOT)
         msg = " ".join(f"{k}={v}" for k, v in dbg.items())
@@ -483,6 +470,19 @@ def _log_manuscript_debug(prefix: str = "post-bootstrap") -> None:
         print(f"[manuscript-debug:{prefix}] status unavailable: {exc}")
 
 
+
+
+def _try_use_cached_gpcr_data(data_dir_name: str, subdir_hint: str) -> bool:
+    """Reuse a previous extract under runtime_data (avoids re-downloading on reboot)."""
+    base = (PROJECT_ROOT / data_dir_name).resolve()
+    for candidate in (base, PROJECT_ROOT):
+        root = _find_gpcr_data_root(candidate, subdir_hint=subdir_hint)
+        if root and _is_inference_ready_gpcr_root(root):
+            _apply_gpcr_data_root(root)
+            print(f"[gpcr-data] Using cached GPCR_DATA_ROOT={root}")
+            _log_manuscript_debug("cached")
+            return True
+    return False
 
 
 def _resolve_data_download_source() -> tuple[str, str]:
@@ -509,27 +509,50 @@ def _bootstrap_cloud_gpcr_data() -> bool:
     """
     zip_url, data_source_key = _resolve_data_download_source()
     current = os.environ.get("GPCR_DATA_ROOT", "").strip()
-    if current and _is_manuscript_ready_gpcr_root(Path(current)):
+    data_dir_name = _read_deploy_cfg("DATA_DIR", "runtime_data")
+    subdir_hint = _read_deploy_cfg("DATA_EXTRACTED_SUBDIR", "")
+
+    if current and _is_inference_ready_gpcr_root(Path(current)):
         _apply_gpcr_data_root(Path(current))
         _log_manuscript_debug("ready")
-        _render_cloud_data_health(PROJECT_ROOT, expanded=False)
         return True
+
+    if _try_use_cached_gpcr_data(data_dir_name, subdir_hint):
+        return True
+
+    if _has_bundled_ligand_lookup():
+        print(
+            "[gpcr-data] ligand_feature_lookup.joblib is in the repo — "
+            "use a slim Drive zip (Josh_Receptor_Features + ML_code only), not the 1.3GB inference zip."
+        )
 
     if not zip_url:
         if current and _is_valid_gpcr_data_root(Path(current)):
             _apply_gpcr_data_root(Path(current))
         _log_manuscript_debug("no-zip-url")
-        return _is_manuscript_ready_gpcr_root(Path(os.environ.get("GPCR_DATA_ROOT", ".")))
-
-    data_dir_name = _read_deploy_cfg("DATA_DIR", "runtime_data")
-    subdir_hint = _read_deploy_cfg("DATA_EXTRACTED_SUBDIR", "")
+        root = Path(os.environ.get("GPCR_DATA_ROOT", "."))
+        if _has_bundled_ligand_lookup() and not _is_valid_gpcr_data_root(root):
+            st.error(
+                "Ligand lookup is in the repo, but **Josh_Receptor_Features** is missing. "
+                "Set **DATA_DRIVE_FILE_ID** to a **slim** zip (pockets + ML_code only), "
+                "or add pocket CSVs under the app."
+            )
+        return _is_inference_ready_gpcr_root(root)
 
     if _is_streamlit_cloud():
-        st.warning(
-            "First visit downloads ~2.9 GB and unpacks ~7 GB. Streamlit Cloud free tier (~1 GB RAM) "
-            "may kill the app during unzip. If you see **Oh no**, use a **smaller inference zip** "
-            "(Josh_Receptor_Features + ML_code only) or run locally."
-        )
+        if _has_bundled_ligand_lookup():
+            st.warning(
+                "Downloading/extracting a **large** data zip can exceed Streamlit's ~1 GB RAM and crash "
+                "the app (log stops right after **100%** download). With **ligand_feature_lookup.joblib** "
+                "in the repo, use a **slim** zip: **Josh_Receptor_Features** + **ML_code** only — "
+                "remove the 1.3 GB full inference zip from secrets."
+            )
+        else:
+            st.warning(
+                "First visit downloads a large zip. Streamlit Cloud free tier (~1 GB RAM) "
+                "may kill the app during unzip. Prefer **ligand_feature_lookup.joblib** in git LFS "
+                "plus a slim pockets zip."
+            )
 
     try:
         with st.status("Downloading GPCR data (first run may take several minutes)...", expanded=True):
@@ -548,7 +571,6 @@ def _bootstrap_cloud_gpcr_data() -> bool:
                 st.warning(
                     "Downloaded data has no **ML_code** folder — manuscript predictions will be inaccurate."
                 )
-            _render_cloud_data_health(PROJECT_ROOT, expanded=True)
         return True
     except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError, OSError) as exc:
         st.error(f"Could not prepare GPCR data from {data_source_key}: {exc}")
@@ -1077,8 +1099,9 @@ def render_gpcr_prediction_page():
     """Render the GPCR Ligand Functional Activity Prediction page."""
     if not _bootstrap_cloud_gpcr_data():
         st.error(
-            "Training data is not ready. Configure **DATA_DRIVE_FILE_ID** in secrets, "
-            "wait for the first download to finish, or use a smaller inference zip on Streamlit Cloud."
+            "Training data is not ready. If **ligand_feature_lookup.joblib** is in the repo, set "
+            "**DATA_DRIVE_FILE_ID** to a **slim** zip (Josh_Receptor_Features + ML_code only). "
+            "Do not use the 1.3 GB full inference zip on Cloud — it OOMs during unzip."
         )
         return
 
@@ -1101,7 +1124,6 @@ def render_gpcr_prediction_page():
         """
     )
 
-    _render_cloud_data_health(PROJECT_ROOT, expanded=not manuscript_data_health(PROJECT_ROOT)["prediction_ready"])
     _artifact_scan = scan_manuscript_artifacts(HANDOFF_DIR)
     _has_manuscript = manuscript_bundle_available(HANDOFF_DIR)
     _ms_regimes = _artifact_scan.get("regimes") or {}
@@ -1241,10 +1263,7 @@ def render_gpcr_prediction_page():
             f"manifest_feature_count={dbg['manifest_feature_count']} "
             f"ligand_lookup_exists={dbg['ligand_lookup_exists']} "
             f"ligand_lookup_entries={dbg['ligand_lookup_entries']} "
-            f"ligand_lookup_source={dbg['ligand_lookup_source']} "
-            f"prediction_ready={dbg.get('prediction_ready')} "
-            f"receptor_workbook_count={dbg.get('receptor_workbook_count')} "
-            f"beta2_agonist_workbook={dbg.get('beta2_agonist_workbook')}"
+            f"ligand_lookup_source={dbg['ligand_lookup_source']}"
         )
         with st.sidebar.expander("Manuscript feature diagnostics", expanded=False):
             st.write(f"GPCR data root: `{dbg['gpcr_data_root']}`")
@@ -1256,11 +1275,6 @@ def render_gpcr_prediction_page():
             st.write(f"ligand lookup exists: `{dbg['ligand_lookup_exists']}`")
             st.write(f"ligand lookup entries: `{dbg['ligand_lookup_entries']}`")
             st.write(f"ligand lookup source: `{dbg['ligand_lookup_source']}`")
-            st.write(f"prediction ready: `{dbg.get('prediction_ready', False)}`")
-            st.write(f"receptor workbook count: `{dbg.get('receptor_workbook_count', 0)}`")
-            st.write(f"beta2 agonist workbook: `{dbg.get('beta2_agonist_workbook', False)}`")
-            for issue in dbg.get("data_issues") or []:
-                st.write(f"issue: {issue}")
 
     st.divider()
 
@@ -1328,23 +1342,6 @@ def render_gpcr_prediction_page():
         def _render_single_prediction_from_session(pred: dict) -> None:
             """Render persisted single-prediction outputs so docking reruns do not reset the panel."""
             st.success("Valid input")
-            fs = pred.get("feature_summary")
-            if fs:
-                src = fs.get("ligand_source", "?")
-                nz = fs.get("nonzero_features", 0)
-                mf = fs.get("manifest_features", 0)
-                wk = fs.get("workbook_ligand_keys", 0)
-                if src in ("mordred_fallback", "lookup_partial"):
-                    st.warning(
-                        f"Ligand features: **{src}** ({wk} workbook keys, "
-                        f"{nz}/{mf} nonzero). For training SMILES, deploy "
-                        f"`ligand_feature_lookup.joblib` or a data zip with *_NEW.xlsx."
-                    )
-                else:
-                    st.caption(
-                        f"Ligand features: **{src}** ({wk} workbook keys, {nz}/{mf} nonzero, "
-                        f"{fs.get('nonzero_pct', 0)}%)."
-                    )
 
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -1415,14 +1412,6 @@ def render_gpcr_prediction_page():
                     predictor=predictor,
                 )
                 if result.is_valid:
-                    feat_meta = None
-                    if getattr(predictor, "feature_mode", "") == "manuscript":
-                        try:
-                            feat_meta = inference_feature_summary(
-                                HANDOFF_DIR, receptor_selected, ligand_to_use
-                            )
-                        except Exception:
-                            feat_meta = None
                     st.session_state["last_single_prediction"] = {
                         "receptor": result.receptor,
                         "canonical_smiles": result.canonical_smiles,
@@ -1432,7 +1421,6 @@ def render_gpcr_prediction_page():
                         "prob_antagonist": float(result.prob_antagonist),
                         "prob_inactive": float(result.prob_inactive),
                         "prob_std_error": float(result.prob_std_error) if result.prob_std_error is not None else None,
-                        "feature_summary": feat_meta,
                     }
                     st.session_state.pop("last_docking_result", None)
                 else:
