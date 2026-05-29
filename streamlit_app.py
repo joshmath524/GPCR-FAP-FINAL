@@ -177,6 +177,69 @@ def _stream_url_to_file(opener: urllib.request.OpenerDirector, download_url: str
             out.write(chunk)
 
 
+def _is_google_drive_ref(url_or_id: str) -> bool:
+    raw = url_or_id.strip()
+    if not raw:
+        return False
+    lower = raw.lower()
+    if raw.startswith("http"):
+        return (
+            "drive.google.com" in lower
+            or "drive.usercontent.google.com" in lower
+            or "docs.google.com" in lower
+        )
+    return bool(re.fullmatch(r"[a-zA-Z0-9_-]{15,}", raw))
+
+
+def _format_drive_download_error(errors: list[str]) -> str:
+    details = "; ".join(errors)
+    lower = details.lower()
+    if "too many users" in lower or "download quota" in lower:
+        return (
+            "Google Drive blocked automated downloads (shared-file daily quota). "
+            "Fix: (1) In Drive, right-click the zip -> Make a copy -> share the copy "
+            "and set DATA_DRIVE_FILE_ID to the new file ID; (2) wait up to 24 hours; "
+            "(3) host the zip on Hugging Face or S3 and set DATA_ZIP_URL to that direct https link. "
+            f"Details: {details}"
+        )
+    return (
+        "Google Drive download failed. Share the zip as Anyone with the link (Viewer), "
+        "then set secrets to DATA_DRIVE_FILE_ID or DATA_ZIP_URL. "
+        f"Details: {details}"
+    )
+
+
+def _download_http_archive(url: str, dest_zip: Path) -> None:
+    """Download a zip from a direct HTTPS URL (Hugging Face /resolve/, S3, etc.)."""
+    dest_zip.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; GPCR-FAP/1.0)"},
+    )
+    with urllib.request.urlopen(req, timeout=3600) as resp, open(dest_zip, "wb") as out:
+        while True:
+            chunk = resp.read(8 * 1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+    if not _looks_like_zip_file(dest_zip):
+        dest_zip.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"URL did not return a zip file ({url[:96]}). "
+            "Use a direct download link, e.g. Hugging Face .../resolve/main/file.zip"
+        )
+
+
+def _download_data_archive(url_or_id: str, dest_zip: Path) -> None:
+    if _is_google_drive_ref(url_or_id):
+        _download_google_drive(url_or_id, dest_zip)
+        return
+    url = url_or_id.strip()
+    if not url.startswith("http"):
+        url = f"https://{url}"
+    _download_http_archive(url, dest_zip)
+
+
 def _gdown_download_file(file_id: str, dest_zip: Path) -> None:
     """gdown 4.x–6.x compatible (no fuzzy= — removed in gdown 6)."""
     import gdown
@@ -284,11 +347,7 @@ def _download_google_drive(url: str, dest_zip: Path) -> None:
             errors.append(f"urllib: {exc}")
             dest_zip.unlink(missing_ok=True)
 
-    raise RuntimeError(
-        "Google Drive download failed. Share the zip as **Anyone with the link -> Viewer**, "
-        "then set secrets to DATA_DRIVE_FILE_ID or DATA_ZIP_URL. "
-        f"Details: {'; '.join(errors)}"
-    )
+    raise RuntimeError(_format_drive_download_error(errors))
 
 
 
@@ -352,7 +411,7 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
     print("[gpcr-data] downloading training zip (first run only)...")
     with tempfile.TemporaryDirectory(prefix="gpcr_zip_") as tmp:
         zip_path = Path(tmp) / "gpcr_data.zip"
-        _download_google_drive(zip_url, zip_path)
+        _download_data_archive(zip_url, zip_path)
         print(f"[gpcr-data] download complete ({zip_path.stat().st_size / 1e9:.2f} GB), extracting...")
         _gc.collect()
         _extract_data_zip(zip_path, staging)
@@ -442,10 +501,17 @@ def _bootstrap_cloud_gpcr_data() -> bool:
         return True
     except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError, OSError) as exc:
         st.error(f"Could not prepare GPCR data from DATA_ZIP_URL: {exc}")
+        err_text = str(exc).lower()
+        if "too many users" in err_text or "download quota" in err_text:
+            st.warning(
+                "**Google Drive quota:** automated downloads are blocked for this file today. "
+                "Make a **copy** of the zip in Drive (new file ID), wait 24h, or upload the zip to "
+                "**Hugging Face** and set `DATA_ZIP_URL` to the `.../resolve/main/....zip` link."
+            )
         st.info(
-            "Set Streamlit secrets: `DATA_ZIP_URL`, optional `DATA_DIR` (default runtime_data), "
-            "optional `DATA_EXTRACTED_SUBDIR` if the zip has one top-level folder. "
-            "On Cloud, prefer a slim zip with only **Josh_Receptor_Features** and **ML_code**."
+            "Secrets: `DATA_DRIVE_FILE_ID` (Drive id) or `DATA_ZIP_URL` (any direct https zip URL), "
+            "`DATA_DIR`, `DATA_EXTRACTED_SUBDIR` (e.g. GPCRtryagain - Delete - Copy). "
+            "For Cloud, a slim zip with only **Josh_Receptor_Features** + **ML_code** uses less RAM."
         )
         return False
 
