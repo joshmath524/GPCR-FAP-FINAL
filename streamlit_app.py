@@ -443,9 +443,38 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
     return str(root)
 
 
+
+
+def _render_cloud_data_health(project_root: Path, *, expanded: bool = False) -> dict:
+    """Surface why Cloud predictions may differ from local (missing workbooks, etc.)."""
+    health = manuscript_data_health(project_root)
+    if health["prediction_ready"]:
+        return health
+    with st.expander("Data setup issue (predictions may be wrong)", expanded=expanded):
+        st.warning(
+            "Manuscript models need **per-receptor *_NEW.xlsx** workbooks (or "
+            "`artifacts/manuscript/ligand_feature_lookup.joblib`) under **GPCR_DATA_ROOT**, "
+            "not only **Josh_Receptor_Features** + **ML_code**."
+        )
+        for issue in health.get("issues") or []:
+            st.markdown(f"- {issue}")
+        sample = ", ".join(health["receptors_with_workbooks"][:8]) or "none"
+        st.markdown(
+            f"- Receptors with workbooks found: **{health['receptor_workbook_count']}** ({sample})"
+        )
+        st.markdown(
+            "- Fix: include `beta2/beta2_agonist_enriched_NEW.xlsx` (and other receptors) in the Drive zip, "
+            "or run `scripts/build_manuscript_ligand_lookup.py` locally and commit the `.joblib`."
+        )
+    return health
+
 def _log_manuscript_debug(prefix: str = "post-bootstrap") -> None:
     try:
-        from src.gpcr.manuscript_features import manuscript_debug_status
+        from src.gpcr.manuscript_features import (
+    inference_feature_summary,
+    manuscript_data_health,
+    manuscript_debug_status,
+)
 
         dbg = manuscript_debug_status(PROJECT_ROOT)
         msg = " ".join(f"{k}={v}" for k, v in dbg.items())
@@ -483,6 +512,7 @@ def _bootstrap_cloud_gpcr_data() -> bool:
     if current and _is_manuscript_ready_gpcr_root(Path(current)):
         _apply_gpcr_data_root(Path(current))
         _log_manuscript_debug("ready")
+        _render_cloud_data_health(PROJECT_ROOT, expanded=False)
         return True
 
     if not zip_url:
@@ -518,6 +548,7 @@ def _bootstrap_cloud_gpcr_data() -> bool:
                 st.warning(
                     "Downloaded data has no **ML_code** folder — manuscript predictions will be inaccurate."
                 )
+            _render_cloud_data_health(PROJECT_ROOT, expanded=True)
         return True
     except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError, OSError) as exc:
         st.error(f"Could not prepare GPCR data from {data_source_key}: {exc}")
@@ -1070,6 +1101,7 @@ def render_gpcr_prediction_page():
         """
     )
 
+    _render_cloud_data_health(PROJECT_ROOT, expanded=not manuscript_data_health(PROJECT_ROOT)["prediction_ready"])
     _artifact_scan = scan_manuscript_artifacts(HANDOFF_DIR)
     _has_manuscript = manuscript_bundle_available(HANDOFF_DIR)
     _ms_regimes = _artifact_scan.get("regimes") or {}
@@ -1209,7 +1241,10 @@ def render_gpcr_prediction_page():
             f"manifest_feature_count={dbg['manifest_feature_count']} "
             f"ligand_lookup_exists={dbg['ligand_lookup_exists']} "
             f"ligand_lookup_entries={dbg['ligand_lookup_entries']} "
-            f"ligand_lookup_source={dbg['ligand_lookup_source']}"
+            f"ligand_lookup_source={dbg['ligand_lookup_source']} "
+            f"prediction_ready={dbg.get('prediction_ready')} "
+            f"receptor_workbook_count={dbg.get('receptor_workbook_count')} "
+            f"beta2_agonist_workbook={dbg.get('beta2_agonist_workbook')}"
         )
         with st.sidebar.expander("Manuscript feature diagnostics", expanded=False):
             st.write(f"GPCR data root: `{dbg['gpcr_data_root']}`")
@@ -1221,6 +1256,11 @@ def render_gpcr_prediction_page():
             st.write(f"ligand lookup exists: `{dbg['ligand_lookup_exists']}`")
             st.write(f"ligand lookup entries: `{dbg['ligand_lookup_entries']}`")
             st.write(f"ligand lookup source: `{dbg['ligand_lookup_source']}`")
+            st.write(f"prediction ready: `{dbg.get('prediction_ready', False)}`")
+            st.write(f"receptor workbook count: `{dbg.get('receptor_workbook_count', 0)}`")
+            st.write(f"beta2 agonist workbook: `{dbg.get('beta2_agonist_workbook', False)}`")
+            for issue in dbg.get("data_issues") or []:
+                st.write(f"issue: {issue}")
 
     st.divider()
 
@@ -1288,6 +1328,23 @@ def render_gpcr_prediction_page():
         def _render_single_prediction_from_session(pred: dict) -> None:
             """Render persisted single-prediction outputs so docking reruns do not reset the panel."""
             st.success("Valid input")
+            fs = pred.get("feature_summary")
+            if fs:
+                src = fs.get("ligand_source", "?")
+                nz = fs.get("nonzero_features", 0)
+                mf = fs.get("manifest_features", 0)
+                wk = fs.get("workbook_ligand_keys", 0)
+                if src in ("mordred_fallback", "lookup_partial"):
+                    st.warning(
+                        f"Ligand features: **{src}** ({wk} workbook keys, "
+                        f"{nz}/{mf} nonzero). For training SMILES, deploy "
+                        f"`ligand_feature_lookup.joblib` or a data zip with *_NEW.xlsx."
+                    )
+                else:
+                    st.caption(
+                        f"Ligand features: **{src}** ({wk} workbook keys, {nz}/{mf} nonzero, "
+                        f"{fs.get('nonzero_pct', 0)}%)."
+                    )
 
             col1, col2, col3 = st.columns(3)
             with col1:
@@ -1358,6 +1415,14 @@ def render_gpcr_prediction_page():
                     predictor=predictor,
                 )
                 if result.is_valid:
+                    feat_meta = None
+                    if getattr(predictor, "feature_mode", "") == "manuscript":
+                        try:
+                            feat_meta = inference_feature_summary(
+                                HANDOFF_DIR, receptor_selected, ligand_to_use
+                            )
+                        except Exception:
+                            feat_meta = None
                     st.session_state["last_single_prediction"] = {
                         "receptor": result.receptor,
                         "canonical_smiles": result.canonical_smiles,
@@ -1367,6 +1432,7 @@ def render_gpcr_prediction_page():
                         "prob_antagonist": float(result.prob_antagonist),
                         "prob_inactive": float(result.prob_inactive),
                         "prob_std_error": float(result.prob_std_error) if result.prob_std_error is not None else None,
+                        "feature_summary": feat_meta,
                     }
                     st.session_state.pop("last_docking_result", None)
                 else:

@@ -86,11 +86,11 @@ def _ligand_row_for_smiles(
 ) -> Dict[str, float]:
     from .new_workbook_ligand import ligand_dict_from_new_workbooks
 
-    row = ligand_dict_from_new_workbooks(receptor_input, canon)
-    if not row:
-        lookup, _ = _load_ligand_lookup(project_root)
-        if canon in lookup and lookup[canon]:
-            row = dict(lookup[canon])
+    lookup, _ = _load_ligand_lookup(project_root)
+    row: Dict[str, float] = dict(lookup.get(canon, {}))
+    wb = ligand_dict_from_new_workbooks(receptor_input, canon)
+    if wb:
+        row.update(wb)
     computed = build_ligand_descriptor_dict(canon, mol=mol) or {}
     for col, val in computed.items():
         if col not in row:
@@ -170,6 +170,114 @@ def build_demo_2103_features(receptor_input: str, ligand_smiles: str) -> Optiona
     return _compute_full_features(receptor_input, canon)
 
 
+_LIGAND_WORKBOOK_SUFFIXES = (
+    "agonist_enriched_NEW.xlsx",
+    "antagonist_enriched_NEW.xlsx",
+    "non_active_compounds_NEW.xlsx",
+)
+
+
+def _gpcr_data_root_path() -> Path:
+    raw = os.environ.get("GPCR_DATA_ROOT", "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parents[2]
+
+
+def manuscript_data_health(project_root: Path) -> Dict[str, object]:
+    """
+    Check whether Cloud/local GPCR_DATA_ROOT can support manuscript predictions.
+
+    Workbooks (*_NEW.xlsx per receptor) or ligand_feature_lookup.joblib are required
+    for training-aligned ligand columns; pocket CSVs + Mordred alone are weaker.
+    """
+    gpcr_root = _gpcr_data_root_path()
+    ml_root = Path(os.environ.get("MANUSCRIPT_ML_ROOT", "").strip() or (gpcr_root / "ML_code"))
+    lookup_path = _manuscript_root(project_root) / "ligand_feature_lookup.joblib"
+    lookup, _ = _load_ligand_lookup(project_root)
+
+    receptors_with_workbooks: List[str] = []
+    if gpcr_root.is_dir():
+        for child in sorted(gpcr_root.iterdir()):
+            if not child.is_dir() or child.name.startswith("."):
+                continue
+            if child.name in ("Josh_Receptor_Features", "ML_code", "runtime_data"):
+                continue
+            for suffix in _LIGAND_WORKBOOK_SUFFIXES:
+                if (child / f"{child.name}_{suffix}").is_file():
+                    receptors_with_workbooks.append(child.name)
+                    break
+
+    josh = (gpcr_root / "Josh_Receptor_Features").is_dir()
+    ml_ok = ml_root.is_dir()
+    beta2_wb = (gpcr_root / "beta2" / "beta2_agonist_enriched_NEW.xlsx").is_file()
+    manuscript_ready = josh and ml_ok
+    prediction_ready = manuscript_ready and (
+        bool(receptors_with_workbooks) or len(lookup) > 0
+    )
+
+    issues: List[str] = []
+    if not josh:
+        issues.append("Missing Josh_Receptor_Features under GPCR_DATA_ROOT")
+    if not ml_ok:
+        issues.append("Missing ML_code (set MANUSCRIPT_ML_ROOT or include ML_code in zip)")
+    if manuscript_ready and not receptors_with_workbooks and not lookup:
+        issues.append(
+            "No per-receptor *_NEW.xlsx workbooks and no ligand_feature_lookup.joblib — "
+            "ligands use Mordred-only fallback (~half the descriptor signal vs local full data)"
+        )
+
+    return {
+        "gpcr_data_root": str(gpcr_root.resolve()) if gpcr_root.exists() else str(gpcr_root),
+        "manuscript_ready": manuscript_ready,
+        "prediction_ready": prediction_ready,
+        "receptors_with_workbooks": receptors_with_workbooks,
+        "receptor_workbook_count": len(receptors_with_workbooks),
+        "beta2_agonist_workbook": beta2_wb,
+        "ligand_lookup_entries": len(lookup),
+        "issues": issues,
+    }
+
+
+def inference_feature_summary(
+    project_root: Path,
+    receptor_input: str,
+    ligand_smiles: str,
+) -> Optional[Dict[str, object]]:
+    """Per-prediction ligand path: workbook hit vs Mordred fallback + nonzero count."""
+    from .new_workbook_ligand import ligand_dict_from_new_workbooks
+
+    canon = _canonicalize_smiles(ligand_smiles)
+    if canon is None:
+        return None
+    cols = load_feature_columns(project_root)
+    vec = build_manuscript_feature_row(project_root, receptor_input, canon, feature_columns=cols)
+    if vec is None:
+        return None
+    wb = ligand_dict_from_new_workbooks(receptor_input, canon)
+    nz = int(np.count_nonzero(np.abs(vec) > 1e-12))
+    n_cols = len(cols)
+    lookup_row = _load_ligand_lookup(project_root)[0].get(canon, {})
+    if len(wb) >= 500:
+        source = "workbook"
+    elif len(wb) > 0:
+        source = "workbook_partial"
+    elif len(lookup_row) >= 500:
+        source = "lookup"
+    elif len(lookup_row) > 0:
+        source = "lookup_partial"
+    else:
+        source = "mordred_fallback"
+    return {
+        "canonical_smiles": canon,
+        "workbook_ligand_keys": len(wb),
+        "nonzero_features": nz,
+        "manifest_features": n_cols,
+        "nonzero_pct": round(100.0 * nz / n_cols, 1) if n_cols else 0.0,
+        "ligand_source": source,
+    }
+
+
 def manuscript_debug_status(project_root: Path) -> Dict[str, object]:
     """
     Runtime diagnostics for manuscript feature-path resolution.
@@ -192,6 +300,7 @@ def manuscript_debug_status(project_root: Path) -> Dict[str, object]:
         except Exception:
             feature_columns_count = 0
 
+    health = manuscript_data_health(project_root)
     return {
         "gpcr_data_root": str(gpcr_root.resolve()),
         "ml_root": ml_root,
@@ -202,4 +311,8 @@ def manuscript_debug_status(project_root: Path) -> Dict[str, object]:
         "ligand_lookup_exists": lookup_path.exists(),
         "ligand_lookup_entries": len(lookup),
         "ligand_lookup_source": lookup_source,
+        "prediction_ready": health["prediction_ready"],
+        "receptor_workbook_count": health["receptor_workbook_count"],
+        "beta2_agonist_workbook": health["beta2_agonist_workbook"],
+        "data_issues": health["issues"],
     }

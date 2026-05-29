@@ -101,6 +101,7 @@ def main() -> None:
             if df is None or "SMILES" not in df.columns:
                 continue
             files_loaded += 1
+            print(f"  [{files_loaded}] {path.relative_to(DATA_ROOT)} ({len(df):,} rows)", flush=True)
             num_cols = [c for c in df.columns if c not in EXCLUDE]
             for _, row in df.iterrows():
                 smi = row.get("SMILES")
