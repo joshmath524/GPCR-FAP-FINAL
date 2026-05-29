@@ -454,15 +454,31 @@ def _log_manuscript_debug(prefix: str = "post-bootstrap") -> None:
         print(f"[manuscript-debug:{prefix}] status unavailable: {exc}")
 
 
+
+
+def _resolve_data_download_source() -> tuple[str, str]:
+    """Return (url_or_id, secret_key_used). DATA_ZIP_URL wins if both are set."""
+    zip_url = _read_deploy_cfg("DATA_ZIP_URL")
+    drive_id = _read_deploy_cfg("DATA_DRIVE_FILE_ID")
+    if zip_url and drive_id:
+        print(
+            "[gpcr-data] WARNING: both DATA_ZIP_URL and DATA_DRIVE_FILE_ID are set; "
+            "using DATA_ZIP_URL only. Remove the old one from secrets."
+        )
+    if zip_url:
+        return zip_url, "DATA_ZIP_URL"
+    if drive_id:
+        return drive_id, "DATA_DRIVE_FILE_ID"
+    return "", ""
+
+
 def _bootstrap_cloud_gpcr_data() -> bool:
     """
     On Streamlit Cloud: download DATA_ZIP_URL, extract, set GPCR_DATA_ROOT / MANUSCRIPT_ML_ROOT.
     Skipped when the current root already has Josh_Receptor_Features and ML_code.
     Returns True when manuscript-ready data is available.
     """
-    zip_url = _read_deploy_cfg("DATA_ZIP_URL")
-    if not zip_url:
-        zip_url = _read_deploy_cfg("DATA_DRIVE_FILE_ID")
+    zip_url, data_source_key = _resolve_data_download_source()
     current = os.environ.get("GPCR_DATA_ROOT", "").strip()
     if current and _is_manuscript_ready_gpcr_root(Path(current)):
         _apply_gpcr_data_root(Path(current))
@@ -487,6 +503,10 @@ def _bootstrap_cloud_gpcr_data() -> bool:
 
     try:
         with st.status("Downloading GPCR data (first run may take several minutes)...", expanded=True):
+            preview = zip_url if len(zip_url) <= 72 else zip_url[:69] + "..."
+            st.caption(f"Data source: **{data_source_key}** → `{preview}`")
+            if data_source_key == "DATA_DRIVE_FILE_ID":
+                st.caption("Direct HTTPS host (Hugging Face): set **DATA_ZIP_URL** instead of Drive.")
             resolved = _prepare_cloud_gpcr_data(zip_url, data_dir_name, subdir_hint)
             _apply_gpcr_data_root(Path(resolved))
             st.write(f"Using **GPCR_DATA_ROOT**: `{resolved}`")
@@ -500,7 +520,7 @@ def _bootstrap_cloud_gpcr_data() -> bool:
                 )
         return True
     except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError, OSError) as exc:
-        st.error(f"Could not prepare GPCR data from DATA_ZIP_URL: {exc}")
+        st.error(f"Could not prepare GPCR data from {data_source_key}: {exc}")
         err_text = str(exc).lower()
         if "too many users" in err_text or "download quota" in err_text:
             st.warning(
