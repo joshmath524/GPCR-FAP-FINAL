@@ -279,11 +279,22 @@ def load_manuscript_models(
         raise FileNotFoundError(f"No stacking bundle in {model_dir}")
 
     models = []
+    use_cloud = os.environ.get("GPCR_CLOUD_LITE", "").strip().lower() in ("1", "true", "yes") or (
+        str(os.environ.get("STREAMLIT_RUNTIME_ENVIRONMENT", "")).strip().lower() == "cloud"
+    )
+    cloud_path = model_dir / f"model_seed{seed}_cloud.pkl"
     seed_path = model_dir / f"model_seed{seed}.pkl"
-    if _valid_model_path(seed_path):
-        models.append(_joblib_load_model(seed_path))
+    pick: Optional[Path] = None
+    if use_cloud and _valid_model_path(cloud_path):
+        pick = cloud_path
+    elif _valid_model_path(seed_path):
+        pick = seed_path
+    if pick is not None:
+        models.append(_joblib_load_model(pick))
     else:
         for p in sorted(model_dir.glob("model_seed*.pkl")):
+            if p.name.endswith("_cloud.pkl"):
+                continue
             if _valid_model_path(p):
                 models.append(_joblib_load_model(p))
     if not models:

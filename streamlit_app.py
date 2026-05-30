@@ -6,9 +6,11 @@ Run from this folder (project root):
 """
 import gc as _gc
 import http.cookiejar
+import json as _json
 import os
 import re
 import shutil
+import subprocess as _subprocess
 import sys
 import tempfile
 import urllib.error
@@ -865,6 +867,63 @@ def _reset_predictor_session() -> None:
     _gc.collect()
 
 
+def _cloud_rf_artifact_ready(evaluation_regime: Optional[str], seed: int) -> bool:
+    if not evaluation_regime:
+        return False
+    rf_dir = HANDOFF_DIR / "artifacts" / "manuscript" / evaluation_regime / "rf"
+    for name in (f"model_seed{seed}_cloud.pkl", f"model_seed{seed}.pkl"):
+        p = rf_dir / name
+        if p.is_file() and p.stat().st_size > 50_000:
+            return True
+    return False
+
+
+def _cloud_predict_subprocess(
+    receptor: str,
+    ligand_smiles: str,
+    evaluation_regime: Optional[str],
+    seed: int,
+) -> dict:
+    """Isolate RF + features in a child process so RAM is freed when it exits."""
+    worker = PROJECT_ROOT / "scripts" / "cloud_predict_worker.py"
+    if not worker.is_file():
+        raise FileNotFoundError(f"Missing {worker}")
+
+    env = os.environ.copy()
+    env.setdefault("GPCR_CLOUD_LITE", "1")
+    env.setdefault("GPCR_JOBLIB_MMAP", "1")
+    cmd = [
+        sys.executable,
+        str(worker),
+        "--project-root",
+        str(HANDOFF_DIR),
+        "--receptor",
+        receptor,
+        "--smiles",
+        ligand_smiles,
+        "--regime",
+        evaluation_regime or "independent_ligand",
+        "--seed",
+        str(int(seed)),
+    ]
+    proc = _subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+        cwd=str(PROJECT_ROOT),
+    )
+    if proc.stdout.strip():
+        line = proc.stdout.strip().splitlines()[-1]
+        try:
+            return _json.loads(line)
+        except _json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid worker JSON: {line[:200]}") from exc
+    err = (proc.stderr or "").strip() or f"worker exit code {proc.returncode}"
+    raise RuntimeError(err)
+
+
 def load_active_predictor(
     model_type: Optional[str] = None,
     evaluation_regime: Optional[str] = None,
@@ -1348,34 +1407,34 @@ def render_gpcr_prediction_page():
         return
 
     predictor = None
+    cloud_subprocess_mode = False
     if _is_streamlit_cloud():
         _pred_key = (evaluation_regime or "", model_type or "", int(seed))
-        cached = st.session_state.get("_active_predictor")
-        if st.session_state.get("_predictor_key") == _pred_key and cached is not None:
-            predictor = cached
-        else:
+        if not st.session_state.get("_cloud_predict_enabled"):
             st.warning(
-                "Streamlit Cloud has **~1 GB RAM**. Loading the RF model uses **~400–700 MB** "
-                "on top of libraries already in memory. If the app disconnects after you click below, "
-                "you need a smaller exported model or a host with **≥2 GB RAM**."
+                "Streamlit Cloud has **~1 GB RAM**. The RF model is **not** loaded into this "
+                "process. Each **Predict** runs in a **separate subprocess** so memory is released afterward."
             )
-            if st.button("Load Random Forest model", type="primary", key="load_predictor_btn"):
+            if not _cloud_rf_artifact_ready(evaluation_regime, seed):
+                st.error(
+                    f"Missing RF weights under `artifacts/manuscript/{evaluation_regime}/rf/`. "
+                    "Need `model_seed42.pkl` or `model_seed42_cloud.pkl` (run `scripts/shrink_rf_for_cloud.py`)."
+                )
+                return
+            if st.button("Enable predictions", type="primary", key="load_predictor_btn"):
+                st.session_state["_cloud_predict_enabled"] = True
+                st.session_state["_predictor_key"] = _pred_key
+                st.session_state.pop("_active_predictor", None)
                 _gc.collect()
-                try:
-                    with st.spinner("Loading Random Forest…"):
-                        predictor = load_predictor(
-                            HANDOFF_DIR,
-                            model_type="rf",
-                            evaluation_regime=evaluation_regime,
-                            seed=seed,
-                        )
-                    st.session_state["_predictor_key"] = _pred_key
-                    st.session_state["_active_predictor"] = predictor
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Could not load Random Forest: {exc}")
-            st.caption("The rest of the form appears after the model loads successfully.")
+                st.rerun()
+            st.caption("The prediction form appears after you enable predictions.")
             return
+        cloud_subprocess_mode = True
+        st.info(
+            "**Cloud mode:** Predict runs in a subprocess (~30–90 s). "
+            "If the page shows *Connecting…* and reloads, the worker ran out of memory — "
+            "deploy `model_seed42_cloud.pkl` from `scripts/shrink_rf_for_cloud.py`."
+        )
     else:
         try:
             predictor = load_active_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
@@ -1393,21 +1452,31 @@ def render_gpcr_prediction_page():
                 )
             return
 
-    if predictor is None:
+    if predictor is None and not cloud_subprocess_mode:
         return
 
     st.sidebar.markdown("### Model Info")
-    _mode = getattr(predictor, "feature_mode", "demo_2103")
-    st.sidebar.info(
-        f"**Regime:** {regime_label}\n\n"
-        f"**Model:** {model_type_label}\n\n"
-        f"**Seed:** {seed}\n\n"
-        f"**Feature mode:** {_mode}\n\n"
-        f"**Loaded:** {len(predictor.models)} estimator(s)\n\n"
-        f"**Classes:** {', '.join(predictor.class_names)}"
-    )
+    if cloud_subprocess_mode:
+        st.sidebar.info(
+            f"**Regime:** {regime_label}\n\n"
+            f"**Model:** {model_type_label} (subprocess)\n\n"
+            f"**Seed:** {seed}\n\n"
+            f"**Feature mode:** manuscript"
+        )
+        _mode = "manuscript"
+    else:
+        _mode = getattr(predictor, "feature_mode", "demo_2103")
+    if not cloud_subprocess_mode:
+        st.sidebar.info(
+            f"**Regime:** {regime_label}\n\n"
+            f"**Model:** {model_type_label}\n\n"
+            f"**Seed:** {seed}\n\n"
+            f"**Feature mode:** {_mode}\n\n"
+            f"**Loaded:** {len(predictor.models)} estimator(s)\n\n"
+            f"**Classes:** {', '.join(predictor.class_names)}"
+        )
     _gdata = os.environ.get("GPCR_DATA_ROOT", "").strip()
-    _efd = getattr(predictor, "expected_feature_dim", None)
+    _efd = getattr(predictor, "expected_feature_dim", None) if predictor is not None else 6633
     st.caption(
         f"**ML bundle:** `{HANDOFF_DIR}` · **Pocket data:** `{_gdata or 'default'}` · "
         f"**Features:** {_efd if _efd is not None else '—'} dims"
@@ -1575,27 +1644,59 @@ def render_gpcr_prediction_page():
             if receptor_selected and ligand_to_use:
                 if _CLOUD:
                     _gc.collect()
-                result = predict_single(
-                    receptor_selected,
-                    ligand_to_use,
-                    predictor=predictor,
-                )
-                if result.is_valid:
+                try:
+                    if cloud_subprocess_mode:
+                        with st.spinner("Running prediction (subprocess)…"):
+                            payload = _cloud_predict_subprocess(
+                                receptor_selected,
+                                ligand_to_use,
+                                evaluation_regime,
+                                seed,
+                            )
+                        is_valid = bool(payload.get("is_valid"))
+                        err_msg = str(payload.get("error") or "")
+                    else:
+                        result = predict_single(
+                            receptor_selected,
+                            ligand_to_use,
+                            predictor=predictor,
+                        )
+                        is_valid = result.is_valid
+                        err_msg = result.error
+                        payload = {
+                            "receptor": result.receptor,
+                            "canonical_smiles": result.canonical_smiles,
+                            "predicted_class": result.predicted_class,
+                            "class_id": int(result.class_id),
+                            "prob_agonist": float(result.prob_agonist),
+                            "prob_antagonist": float(result.prob_antagonist),
+                            "prob_inactive": float(result.prob_inactive),
+                            "prob_std_error": (
+                                float(result.prob_std_error) if result.prob_std_error is not None else None
+                            ),
+                        }
+                except (RuntimeError, _subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                    st.session_state.pop("last_single_prediction", None)
+                    st.error(f"Prediction failed: {exc}")
+                    if _CLOUD:
+                        _gc.collect()
+                    return
+                if is_valid:
                     st.session_state["last_single_prediction"] = {
-                        "receptor": result.receptor,
-                        "canonical_smiles": result.canonical_smiles,
-                        "predicted_class": result.predicted_class,
-                        "class_id": int(result.class_id),
-                        "prob_agonist": float(result.prob_agonist),
-                        "prob_antagonist": float(result.prob_antagonist),
-                        "prob_inactive": float(result.prob_inactive),
-                        "prob_std_error": float(result.prob_std_error) if result.prob_std_error is not None else None,
+                        "receptor": payload["receptor"],
+                        "canonical_smiles": payload["canonical_smiles"],
+                        "predicted_class": payload["predicted_class"],
+                        "class_id": int(payload["class_id"]),
+                        "prob_agonist": float(payload["prob_agonist"]),
+                        "prob_antagonist": float(payload["prob_antagonist"]),
+                        "prob_inactive": float(payload["prob_inactive"]),
+                        "prob_std_error": payload.get("prob_std_error"),
                     }
                     st.session_state.pop("last_docking_result", None)
                 else:
                     st.session_state.pop("last_single_prediction", None)
                     st.session_state.pop("last_docking_result", None)
-                    st.error(result.error)
+                    st.error(err_msg or "Prediction failed")
                 if _CLOUD:
                     _gc.collect()
             else:
