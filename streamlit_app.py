@@ -870,58 +870,55 @@ def _reset_predictor_session() -> None:
 def _cloud_rf_artifact_ready(evaluation_regime: Optional[str], seed: int) -> bool:
     if not evaluation_regime:
         return False
-    rf_dir = HANDOFF_DIR / "artifacts" / "manuscript" / evaluation_regime / "rf"
-    for name in (f"model_seed{seed}_cloud.pkl", f"model_seed{seed}.pkl"):
-        p = rf_dir / name
-        if p.is_file() and p.stat().st_size > 50_000:
-            return True
-    return False
+    p = (
+        HANDOFF_DIR
+        / "artifacts"
+        / "manuscript"
+        / evaluation_regime
+        / "rf"
+        / f"model_seed{seed}_cloud.pkl"
+    )
+    return p.is_file() and p.stat().st_size > 50_000
 
 
-def _cloud_predict_subprocess(
+def _cloud_predict_ephemeral(
     receptor: str,
     ligand_smiles: str,
     evaluation_regime: Optional[str],
     seed: int,
 ) -> dict:
-    """Isolate RF + features in a child process so RAM is freed when it exits."""
-    worker = PROJECT_ROOT / "scripts" / "cloud_predict_worker.py"
-    if not worker.is_file():
-        raise FileNotFoundError(f"Missing {worker}")
+    """
+  Run predict in-process: load small cloud RF, score, then drop model.
 
-    env = os.environ.copy()
-    env.setdefault("GPCR_CLOUD_LITE", "1")
-    env.setdefault("GPCR_JOBLIB_MMAP", "1")
-    cmd = [
-        sys.executable,
-        str(worker),
-        "--project-root",
-        str(HANDOFF_DIR),
-        "--receptor",
-        receptor,
-        "--smiles",
-        ligand_smiles,
-        "--regime",
-        evaluation_regime or "independent_ligand",
-        "--seed",
-        str(int(seed)),
-    ]
-    proc = _subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        env=env,
-        cwd=str(PROJECT_ROOT),
+  Subprocess predict was removed — parent + child shared the same ~1 GB cgroup
+  and OOM-killed the whole app (browser shows *Connecting…*).
+    """
+    _gc.collect()
+    predictor = load_predictor(
+        HANDOFF_DIR,
+        model_type="rf",
+        evaluation_regime=evaluation_regime,
+        seed=seed,
     )
-    if proc.stdout.strip():
-        line = proc.stdout.strip().splitlines()[-1]
-        try:
-            return _json.loads(line)
-        except _json.JSONDecodeError as exc:
-            raise RuntimeError(f"Invalid worker JSON: {line[:200]}") from exc
-    err = (proc.stderr or "").strip() or f"worker exit code {proc.returncode}"
-    raise RuntimeError(err)
+    try:
+        result = predict_single(receptor, ligand_smiles, predictor=predictor)
+    finally:
+        del predictor
+        st.session_state.pop("_active_predictor", None)
+        st.session_state.pop("_predictor_key", None)
+        _gc.collect()
+    return {
+        "is_valid": result.is_valid,
+        "receptor": result.receptor,
+        "canonical_smiles": result.canonical_smiles,
+        "predicted_class": result.predicted_class,
+        "class_id": int(result.class_id),
+        "prob_agonist": float(result.prob_agonist),
+        "prob_antagonist": float(result.prob_antagonist),
+        "prob_inactive": float(result.prob_inactive),
+        "prob_std_error": float(result.prob_std_error) if result.prob_std_error is not None else None,
+        "error": result.error,
+    }
 
 
 def load_active_predictor(
@@ -1452,21 +1449,21 @@ def render_gpcr_prediction_page():
                 )
             return
 
-    if predictor is None and not cloud_subprocess_mode:
+    if predictor is None and not cloud_ephemeral_mode:
         return
 
     st.sidebar.markdown("### Model Info")
-    if cloud_subprocess_mode:
+    if cloud_ephemeral_mode:
         st.sidebar.info(
             f"**Regime:** {regime_label}\n\n"
-            f"**Model:** {model_type_label} (subprocess)\n\n"
+            f"**Model:** {model_type_label} (cloud RF)\n\n"
             f"**Seed:** {seed}\n\n"
             f"**Feature mode:** manuscript"
         )
         _mode = "manuscript"
     else:
         _mode = getattr(predictor, "feature_mode", "demo_2103")
-    if not cloud_subprocess_mode:
+    if not cloud_ephemeral_mode:
         st.sidebar.info(
             f"**Regime:** {regime_label}\n\n"
             f"**Model:** {model_type_label}\n\n"
@@ -1497,8 +1494,8 @@ def render_gpcr_prediction_page():
         _sqlite = _bundled_ligand_lookup_sqlite_path()
         if _sqlite.is_file() and _sqlite.stat().st_size > 100_000:
             st.caption(
-                "**Cloud:** ligand lookup via **SQLite** (full training descriptors, low RAM). "
-                "Use **Random Forest** → **Load Random Forest** → **Predict**."
+                "**Cloud:** ligand lookup via **SQLite** + `model_seed42_cloud.pkl`. "
+                "Click **Predict** (RF loads briefly, then is freed)."
             )
         else:
             st.warning(
@@ -1509,9 +1506,12 @@ def render_gpcr_prediction_page():
 
     st.divider()
 
+    _input_modes = ["Single receptor-ligand pair"]
+    if not _is_streamlit_cloud():
+        _input_modes.append("Batch (CSV)")
     input_mode = st.radio(
         "Input mode",
-        ["Single receptor-ligand pair", "Batch (CSV)"],
+        _input_modes,
         horizontal=True,
         key="input_mode",
     )
@@ -1645,9 +1645,9 @@ def render_gpcr_prediction_page():
                 if _CLOUD:
                     _gc.collect()
                 try:
-                    if cloud_subprocess_mode:
-                        with st.spinner("Running prediction (subprocess)…"):
-                            payload = _cloud_predict_subprocess(
+                    if cloud_ephemeral_mode:
+                        with st.spinner("Running prediction…"):
+                            payload = _cloud_predict_ephemeral(
                                 receptor_selected,
                                 ligand_to_use,
                                 evaluation_regime,
@@ -1675,7 +1675,7 @@ def render_gpcr_prediction_page():
                                 float(result.prob_std_error) if result.prob_std_error is not None else None
                             ),
                         }
-                except (RuntimeError, _subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                except (RuntimeError, FileNotFoundError, MemoryError, OSError) as exc:
                     st.session_state.pop("last_single_prediction", None)
                     st.error(f"Prediction failed: {exc}")
                     if _CLOUD:

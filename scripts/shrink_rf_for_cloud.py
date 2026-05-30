@@ -35,7 +35,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, default=DEFAULT_IN)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUT)
-    parser.add_argument("--trees", type=int, default=150)
+    parser.add_argument("--trees", type=int, default=100)
     args = parser.parse_args()
 
     if not args.input.is_file():

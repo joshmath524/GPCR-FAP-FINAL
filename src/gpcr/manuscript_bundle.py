@@ -285,7 +285,13 @@ def load_manuscript_models(
     cloud_path = model_dir / f"model_seed{seed}_cloud.pkl"
     seed_path = model_dir / f"model_seed{seed}.pkl"
     pick: Optional[Path] = None
-    if use_cloud and _valid_model_path(cloud_path):
+    if use_cloud:
+        if not _valid_model_path(cloud_path):
+            raise FileNotFoundError(
+                f"Streamlit Cloud requires {cloud_path.name} (~25 MB, 150 trees). "
+                "Run: py -3 scripts/shrink_rf_for_cloud.py — do not use the full "
+                f"model_seed{seed}.pkl (1000 trees) on Cloud; it exceeds ~1 GB RAM."
+            )
         pick = cloud_path
     elif _valid_model_path(seed_path):
         pick = seed_path
