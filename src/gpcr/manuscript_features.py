@@ -224,6 +224,14 @@ def _receptor_features(receptor_input: str, data_root: Path) -> Optional[Dict[st
     folder = resolve_receptor_folder(receptor_input, data_root)
     if folder is None:
         return None
+    if os.environ.get("GPCR_POCKET_FEATURES_ONLY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        from .predict import _aggregate_receptor_feature_dict
+
+        return _aggregate_receptor_feature_dict(receptor_input)
     su = _try_import_shared_utilities()
     if su is not None:
         rec = su.aggregate_receptor_features(folder)

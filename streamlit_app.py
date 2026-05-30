@@ -688,6 +688,7 @@ _CLOUD = _is_streamlit_cloud()
 if _CLOUD:
     os.environ.setdefault("GPCR_JOBLIB_MMAP", "1")
     os.environ.setdefault("GPCR_CLOUD_LITE", "1")
+    os.environ.setdefault("GPCR_POCKET_FEATURES_ONLY", "1")
     # Per-SMILES SQLite lookup avoids loading the full joblib dict into RAM.
     _sq = _bundled_ligand_lookup_sqlite_path()
     if not (_sq.is_file() and _sq.stat().st_size > 100_000):
@@ -887,26 +888,20 @@ def _cloud_predict_ephemeral(
     evaluation_regime: Optional[str],
     seed: int,
 ) -> dict:
-    """
-  Run predict in-process: load small cloud RF, score, then drop model.
+    """Minimal cloud inference (small RF only; no GPCRPredictor wrapper)."""
+    from src.gpcr.cloud_predict import predict_cloud_rf
 
-  Subprocess predict was removed — parent + child shared the same ~1 GB cgroup
-  and OOM-killed the whole app (browser shows *Connecting…*).
-    """
     _gc.collect()
-    predictor = load_predictor(
+    result = predict_cloud_rf(
         HANDOFF_DIR,
-        model_type="rf",
-        evaluation_regime=evaluation_regime,
-        seed=seed,
+        receptor,
+        ligand_smiles,
+        evaluation_regime=evaluation_regime or "independent_ligand",
+        seed=int(seed),
     )
-    try:
-        result = predict_single(receptor, ligand_smiles, predictor=predictor)
-    finally:
-        del predictor
-        st.session_state.pop("_active_predictor", None)
-        st.session_state.pop("_predictor_key", None)
-        _gc.collect()
+    st.session_state.pop("_active_predictor", None)
+    st.session_state.pop("_predictor_key", None)
+    _gc.collect()
     return {
         "is_valid": result.is_valid,
         "receptor": result.receptor,
