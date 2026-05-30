@@ -8,3 +8,4 @@ streamlit>=1.33
 scikit-learn==1.7.2
 joblib>=1.2
 gdown>=5.2.0
+py3Dmol>=2.0.0

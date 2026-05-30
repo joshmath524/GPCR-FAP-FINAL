@@ -916,7 +916,6 @@ def _cloud_predict_ephemeral(
         "prob_agonist": float(result.prob_agonist),
         "prob_antagonist": float(result.prob_antagonist),
         "prob_inactive": float(result.prob_inactive),
-        "prob_std_error": float(result.prob_std_error) if result.prob_std_error is not None else None,
         "error": result.error,
     }
 
@@ -993,7 +992,7 @@ def render_home_page():
         Drug discovery teams need to predict the functional activity of ligands binding to GPCR Class A receptors.
         This GUI provides a user-friendly interface for predicting whether a ligand acts as an **Agonist**, **Antagonist**, 
         or is **Inactive** for a given GPCR Class A receptor. The model uses machine learning approaches including
-        LightGBM, Random Forest, and XGBoost to make predictions with uncertainty quantification.
+        LightGBM, Random Forest, and XGBoost.
         """
     )
 
@@ -1003,7 +1002,6 @@ def render_home_page():
         - **Multi-class classification:** Predicts Agonist (class 0), Antagonist (class 1), or Inactive (class 2)
         - **Feature engineering:** Combines ligand physicochemical properties, ECFP fingerprints, receptor features, and interaction terms
         - **Ensemble support:** Works with multiple model seeds for robust predictions
-        - **Uncertainty quantification:** Provides error probabilities and confidence intervals
         - **Evaluation regimes:** Supports baseline, random stratified, scaffold split, and LORO (Leave-One-Receptor-Out) evaluation
         """
     )
@@ -1111,23 +1109,13 @@ def render_documentation_page():
 
     st.markdown(
         """
-        ## Uncertainty Quantification
-        The model provides uncertainty estimates for each prediction:
-        - **Standard Error:** Calculated from the variance across the ensemble models (std_dev / √n).
-        - **95% Confidence Interval:** Probability ± 2×SE, providing a range within which the true probability likely falls.
-        - **Display:** Single predictions show probability distributions and confidence intervals. Batch CSV outputs include columns for standard error and CI bounds.
-        """
-    )
-
-    st.markdown(
-        """
         ## CLI usage
         From the project folder:
         ```bash
         python -m src.gpcr.cli --receptor "ADRB2" --ligand "CCO" --output out.csv
         python -m src.gpcr.cli --input example_inputs.csv --output out.csv
         ```
-        Output columns: receptor, ligand_smiles, canonical_smiles, predicted_class, class_id, prob_agonist, prob_antagonist, prob_inactive, prob_std_error, error.
+        Output columns: receptor, ligand_smiles, canonical_smiles, predicted_class, class_id, prob_agonist, prob_antagonist, prob_inactive, error.
         """
     )
 
@@ -1626,115 +1614,17 @@ def render_gpcr_prediction_page():
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-            std_err = pred.get("prob_std_error")
-            if std_err is not None:
-                std_err = float(std_err)
-                st.markdown("#### Uncertainty Analysis")
-                err_col1, err_col2, err_col3 = st.columns(3)
-                with err_col1:
-                    st.metric("Standard Error", f"± {std_err * 100:.2f}%")
-                prob_max = max(float(pred["prob_agonist"]), float(pred["prob_antagonist"]), float(pred["prob_inactive"]))
-                ci_lower = max(0.0, prob_max - 2 * std_err)
-                ci_upper = min(1.0, prob_max + 2 * std_err)
-                with err_col2:
-                    st.metric("95% CI Lower", f"{ci_lower:.4f}")
-                with err_col3:
-                    st.metric("95% CI Upper", f"{ci_upper:.4f}")
-                st.info(
-                    f"**Prediction Range:** Highest probability = {prob_max:.4f} ± {std_err:.4f} "
-                    f"(95% confidence interval: [{ci_lower:.4f}, {ci_upper:.4f}])"
-                )
+        def _render_docking_section(last_pred: dict) -> None:
+            try:
+                _render_docking_section_impl(last_pred)
+            except Exception as exc:
+                st.error(f"Could not load docking panel: {exc}")
 
-        def _run_single_predict() -> None:
-            if receptor_selected and ligand_to_use:
-                if _CLOUD:
-                    _gc.collect()
-                try:
-                    if cloud_ephemeral_mode:
-                        with st.spinner("Running prediction…"):
-                            payload = _cloud_predict_ephemeral(
-                                receptor_selected,
-                                ligand_to_use,
-                                evaluation_regime,
-                                seed,
-                                model_type,
-                            )
-                        is_valid = bool(payload.get("is_valid"))
-                        err_msg = str(payload.get("error") or "")
-                    else:
-                        result = predict_single(
-                            receptor_selected,
-                            ligand_to_use,
-                            predictor=predictor,
-                        )
-                        is_valid = result.is_valid
-                        err_msg = result.error
-                        payload = {
-                            "receptor": result.receptor,
-                            "canonical_smiles": result.canonical_smiles,
-                            "predicted_class": result.predicted_class,
-                            "class_id": int(result.class_id),
-                            "prob_agonist": float(result.prob_agonist),
-                            "prob_antagonist": float(result.prob_antagonist),
-                            "prob_inactive": float(result.prob_inactive),
-                            "prob_std_error": (
-                                float(result.prob_std_error) if result.prob_std_error is not None else None
-                            ),
-                        }
-                except (RuntimeError, FileNotFoundError, MemoryError, OSError) as exc:
-                    st.session_state.pop("last_single_prediction", None)
-                    st.error(f"Prediction failed: {exc}")
-                    if _CLOUD:
-                        _gc.collect()
-                    return
-                if is_valid:
-                    st.session_state["last_single_prediction"] = {
-                        "receptor": payload["receptor"],
-                        "canonical_smiles": payload["canonical_smiles"],
-                        "predicted_class": payload["predicted_class"],
-                        "class_id": int(payload["class_id"]),
-                        "prob_agonist": float(payload["prob_agonist"]),
-                        "prob_antagonist": float(payload["prob_antagonist"]),
-                        "prob_inactive": float(payload["prob_inactive"]),
-                        "prob_std_error": payload.get("prob_std_error"),
-                    }
-                    st.session_state.pop("last_docking_result", None)
-                else:
-                    st.session_state.pop("last_single_prediction", None)
-                    st.session_state.pop("last_docking_result", None)
-                    st.error(err_msg or "Prediction failed")
-                if _CLOUD:
-                    _gc.collect()
-            else:
-                st.warning("Please select a GPCR Class A receptor and provide ligand SMILES or upload a structure file.")
-
-        _predict_fragment = getattr(st, "fragment", None)
-        if _predict_fragment is not None:
-            @_predict_fragment
-            def _single_predict_panel() -> None:
-                if st.button("Predict", type="primary", key="btn_single"):
-                    _run_single_predict()
-                last_pred = st.session_state.get("last_single_prediction")
-                if last_pred:
-                    _render_single_prediction_from_session(last_pred)
-
-            _single_predict_panel()
-        else:
-            if st.button("Predict", type="primary", key="btn_single"):
-                _run_single_predict()
-            last_pred = st.session_state.get("last_single_prediction")
-            if last_pred:
-                _render_single_prediction_from_session(last_pred)
-
-        last_pred = st.session_state.get("last_single_prediction")
-        if last_pred and _CLOUD and not st.session_state.get("gpcr_show_docking"):
-            if st.button("Show docking tools (optional, uses extra RAM)", key="gpcr_enable_docking"):
-                st.session_state["gpcr_show_docking"] = True
-                st.rerun()
-
-        if last_pred and (not _CLOUD or st.session_state.get("gpcr_show_docking")):
+        def _render_docking_section_impl(last_pred: dict) -> None:
             st.divider()
             st.subheader("Docking + receptor-ligand visualization")
+            if _CLOUD:
+                st.caption("Optional on Cloud — SMINA + 3D viewer use extra RAM and CPU.")
             st.caption(
                 "**Recommended** grid center and size come from this receptor's `<id>_ligand_only.pdb` "
                 "(centroid and padded extent, each axis clipped to 15–20 Å). You can override these in the panel below. "
@@ -1844,7 +1734,15 @@ def render_gpcr_prediction_page():
                 st.session_state["last_docking_result"] = dock_res.__dict__
 
             dock_result = st.session_state.get("last_docking_result")
-            if dock_result and dock_result.get("receptor_name") == str(last_pred["receptor"]):
+            pred_rec = str(last_pred["receptor"])
+            dock_rec = str(dock_result.get("receptor_name", "")) if dock_result else ""
+            rec_root = get_gpcr_data_root()
+            pred_folder = resolve_receptor_folder(pred_rec, rec_root) or pred_rec
+            dock_matches = bool(
+                dock_result
+                and (dock_rec == pred_rec or dock_rec == pred_folder)
+            )
+            if dock_matches:
                 if dock_result.get("ok"):
                     if not py3dmol_available():
                         st.info("Install **py3Dmol** to render the docked complex: `pip install py3Dmol`")
@@ -1883,6 +1781,74 @@ def render_gpcr_prediction_page():
                 else:
                     st.error(str(dock_result.get("message", "Docking failed.")))
 
+        def _run_single_predict() -> None:
+            if receptor_selected and ligand_to_use:
+                if _CLOUD:
+                    _gc.collect()
+                try:
+                    if cloud_ephemeral_mode:
+                        with st.spinner("Running prediction…"):
+                            payload = _cloud_predict_ephemeral(
+                                receptor_selected,
+                                ligand_to_use,
+                                evaluation_regime,
+                                seed,
+                                model_type,
+                            )
+                        is_valid = bool(payload.get("is_valid"))
+                        err_msg = str(payload.get("error") or "")
+                    else:
+                        result = predict_single(
+                            receptor_selected,
+                            ligand_to_use,
+                            predictor=predictor,
+                        )
+                        is_valid = result.is_valid
+                        err_msg = result.error
+                        payload = {
+                            "receptor": result.receptor,
+                            "canonical_smiles": result.canonical_smiles,
+                            "predicted_class": result.predicted_class,
+                            "class_id": int(result.class_id),
+                            "prob_agonist": float(result.prob_agonist),
+                            "prob_antagonist": float(result.prob_antagonist),
+                            "prob_inactive": float(result.prob_inactive),
+                        }
+                except (RuntimeError, FileNotFoundError, MemoryError, OSError) as exc:
+                    st.session_state.pop("last_single_prediction", None)
+                    st.error(f"Prediction failed: {exc}")
+                    if _CLOUD:
+                        _gc.collect()
+                    return
+                if is_valid:
+                    st.session_state["last_single_prediction"] = {
+                        "receptor": payload["receptor"],
+                        "canonical_smiles": payload["canonical_smiles"],
+                        "predicted_class": payload["predicted_class"],
+                        "class_id": int(payload["class_id"]),
+                        "prob_agonist": float(payload["prob_agonist"]),
+                        "prob_antagonist": float(payload["prob_antagonist"]),
+                        "prob_inactive": float(payload["prob_inactive"]),
+                    }
+                    st.session_state.pop("last_docking_result", None)
+                    st.rerun()
+                else:
+                    st.session_state.pop("last_single_prediction", None)
+                    st.session_state.pop("last_docking_result", None)
+                    st.error(err_msg or "Prediction failed")
+                if _CLOUD:
+                    _gc.collect()
+            else:
+                st.warning("Please select a GPCR Class A receptor and provide ligand SMILES or upload a structure file.")
+
+        if st.button("Predict", type="primary", key="btn_single"):
+            _run_single_predict()
+
+        last_pred = st.session_state.get("last_single_prediction")
+        if last_pred:
+            _render_single_prediction_from_session(last_pred)
+            _render_docking_section(last_pred)
+
     else:
         uploaded_file = st.file_uploader(
             "Upload CSV",
@@ -1916,13 +1882,6 @@ def render_gpcr_prediction_page():
                     df_out["prob_agonist"] = [r.prob_agonist for r in results]
                     df_out["prob_antagonist"] = [r.prob_antagonist for r in results]
                     df_out["prob_inactive"] = [r.prob_inactive for r in results]
-                    df_out["prob_std_error"] = [
-                        f"{r.prob_std_error:.6f}" if r.prob_std_error is not None else ""
-                        for r in results
-                    ]
-                    df_out["prob_std_error_pct"] = [
-                        f"{r.prob_std_error * 100:.2f}%" if r.prob_std_error is not None else ""
-                        for r in results]
                     df_out["canonical_smiles"] = [r.canonical_smiles for r in results]
                     df_out["error"] = [r.error for r in results]
 
