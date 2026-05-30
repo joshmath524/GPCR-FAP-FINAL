@@ -75,6 +75,10 @@ def _has_bundled_ligand_lookup() -> bool:
     return p.is_file() and p.stat().st_size > 1_000_000
 
 
+# With ligand_feature_lookup.joblib in git LFS, Cloud only needs pockets + ML_code (~137 MB zip).
+_CLOUD_MAX_ZIP_BYTES = 450_000_000
+
+
 def _is_inference_ready_gpcr_root(path: Path) -> bool:
     """Pockets + ML_code, or pockets + bundled ligand lookup (no per-receptor xlsx on disk)."""
     if _is_manuscript_ready_gpcr_root(path):
@@ -123,6 +127,9 @@ def _ensure_default_gpcr_data_root() -> None:
         _apply_gpcr_data_root(gui)
         return
     if _is_manuscript_ready_gpcr_root(PROJECT_ROOT):
+        _apply_gpcr_data_root(PROJECT_ROOT)
+        return
+    if _is_inference_ready_gpcr_root(PROJECT_ROOT):
         _apply_gpcr_data_root(PROJECT_ROOT)
         return
     # Pocket CSVs only (no ML_code): do not set GPCR_DATA_ROOT here — cloud bootstrap
@@ -184,12 +191,46 @@ def _looks_like_zip_file(path: Path) -> bool:
     return head[:2] == b"PK" or path.stat().st_size > 50_000_000
 
 
-def _stream_url_to_file(opener: urllib.request.OpenerDirector, download_url: str, dest: Path) -> None:
+def _cloud_zip_byte_limit() -> Optional[int]:
+    """Max download bytes on Streamlit Cloud when ligand lookup is in the repo."""
+    if _is_streamlit_cloud() and _has_bundled_ligand_lookup():
+        return _CLOUD_MAX_ZIP_BYTES
+    return None
+
+
+def _check_download_size_limit(dest: Path, max_bytes: Optional[int]) -> None:
+    if max_bytes is None or not dest.is_file():
+        return
+    size = dest.stat().st_size
+    if size > max_bytes:
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Download is {size / 1e9:.2f} GB — too large for Streamlit Cloud (~1 GB RAM). "
+            "Upload **GPCRtryagain-inference-slim.zip** (~137 MB: Josh_Receptor_Features + ML_code only) "
+            "from `GPCR-FAP-main/GPCRtryagain-inference-slim.zip` and update **DATA_DRIVE_FILE_ID**. "
+            "Do not use the ~1.3 GB zip with all *_NEW.xlsx workbooks."
+        )
+
+
+def _stream_url_to_file(
+    opener: urllib.request.OpenerDirector,
+    download_url: str,
+    dest: Path,
+    max_bytes: Optional[int] = None,
+) -> None:
+    total = 0
     with opener.open(download_url, timeout=3600) as resp, open(dest, "wb") as out:
         while True:
             chunk = resp.read(8 * 1024 * 1024)
             if not chunk:
                 break
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                dest.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"Download exceeded {max_bytes / 1e6:.0f} MB — aborting to avoid Cloud OOM. "
+                    "Use the **137 MB** slim zip, not the ~1.3 GB file."
+                )
             out.write(chunk)
 
 
@@ -228,16 +269,26 @@ def _format_drive_download_error(errors: list[str]) -> str:
 def _download_http_archive(url: str, dest_zip: Path) -> None:
     """Download a zip from a direct HTTPS URL (Hugging Face /resolve/, S3, etc.)."""
     dest_zip.parent.mkdir(parents=True, exist_ok=True)
+    max_bytes = _cloud_zip_byte_limit()
     req = urllib.request.Request(
         url,
         headers={"User-Agent": "Mozilla/5.0 (compatible; GPCR-FAP/1.0)"},
     )
+    total = 0
     with urllib.request.urlopen(req, timeout=3600) as resp, open(dest_zip, "wb") as out:
         while True:
             chunk = resp.read(8 * 1024 * 1024)
             if not chunk:
                 break
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                dest_zip.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"Download exceeded {max_bytes / 1e6:.0f} MB — aborting to avoid Cloud OOM. "
+                    "Use the **137 MB** slim zip, not the ~1.3 GB file."
+                )
             out.write(chunk)
+    _check_download_size_limit(dest_zip, max_bytes)
     if not _looks_like_zip_file(dest_zip):
         dest_zip.unlink(missing_ok=True)
         raise RuntimeError(
@@ -277,9 +328,12 @@ def _gdown_download_file(file_id: str, dest_zip: Path) -> None:
         return False
 
     # gdown 6: avoid /file/d/.../view URLs (they trigger removed fuzzy= internally).
+    max_bytes = _cloud_zip_byte_limit()
     if _try(lambda: gdown.download(id=file_id, output=dest, quiet=False)):
+        _check_download_size_limit(dest_zip, max_bytes)
         return
     if _try(lambda: gdown.download(uc_url, dest, quiet=False)):
+        _check_download_size_limit(dest_zip, max_bytes)
         return
 
     if last_error is not None:
@@ -315,21 +369,32 @@ def _download_google_drive_with_cookies(download_url: str, dest_zip: Path) -> No
         if confirm is None:
             confirm = "t"
 
+    max_bytes = _cloud_zip_byte_limit()
     if confirm:
         resp.close()
         sep = "&" if "?" in download_url else "?"
         final_url = f"{download_url}{sep}confirm={confirm}"
-        _stream_url_to_file(opener, final_url, dest_zip)
+        _stream_url_to_file(opener, final_url, dest_zip, max_bytes=max_bytes)
+        _check_download_size_limit(dest_zip, max_bytes)
         return
 
+    total = len(peek)
     with open(dest_zip, "wb") as out:
         out.write(peek)
         while True:
             chunk = resp.read(8 * 1024 * 1024)
             if not chunk:
                 break
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                dest_zip.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"Download exceeded {max_bytes / 1e6:.0f} MB — aborting to avoid Cloud OOM. "
+                    "Use the **137 MB** slim zip, not the ~1.3 GB file."
+                )
             out.write(chunk)
     resp.close()
+    _check_download_size_limit(dest_zip, max_bytes)
 
 
 def _download_google_drive(url: str, dest_zip: Path) -> None:
@@ -413,7 +478,7 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
     base = (PROJECT_ROOT / data_dir_name).resolve()
     marker = base / ".gpcr_data_ready"
     root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
-    if root and _is_manuscript_ready_gpcr_root(root):
+    if root and _is_inference_ready_gpcr_root(root):
         marker.parent.mkdir(parents=True, exist_ok=True)
         if not marker.exists():
             marker.write_text(str(root), encoding="utf-8")
@@ -428,7 +493,16 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
     with tempfile.TemporaryDirectory(prefix="gpcr_zip_") as tmp:
         zip_path = Path(tmp) / "gpcr_data.zip"
         _download_data_archive(zip_url, zip_path)
-        print(f"[gpcr-data] download complete ({zip_path.stat().st_size / 1e9:.2f} GB), extracting...")
+        zip_bytes = zip_path.stat().st_size
+        print(f"[gpcr-data] download complete ({zip_bytes / 1e9:.2f} GB), extracting...")
+        if _is_streamlit_cloud() and _has_bundled_ligand_lookup() and zip_bytes > _CLOUD_MAX_ZIP_BYTES:
+            raise RuntimeError(
+                f"Downloaded zip is {zip_bytes / 1e9:.2f} GB — too large for Streamlit Cloud (~1 GB RAM). "
+                "Your secrets still point at the **full** inference zip (~1.3 GB). "
+                "Upload **GPCRtryagain-inference-slim.zip** (~137 MB: Josh_Receptor_Features + ML_code only) "
+                "to Google Drive and set **DATA_DRIVE_FILE_ID** to that file's id. "
+                "Git LFS only speeds up cloning the lookup joblib; it does not fix unzip OOM."
+            )
         _gc.collect()
         _extract_data_zip(zip_path, staging)
         print("[gpcr-data] extract complete, merging into runtime_data...")
@@ -441,48 +515,67 @@ def _prepare_cloud_gpcr_data(zip_url: str, data_dir_name: str, subdir_hint: str)
             f"Extracted data under {staging} but no Josh_Receptor_Features folder found. "
             "Set DATA_EXTRACTED_SUBDIR in secrets to the folder inside the zip."
         )
-    if not _is_manuscript_ready_gpcr_root(root):
+    if not _is_inference_ready_gpcr_root(root):
         shutil.rmtree(staging, ignore_errors=True)
         raise FileNotFoundError(
-            f"Extracted data at {root} is missing ML_code. "
-            "Use the full training zip (GPCRtryagain - Delete - Copy), not pocket CSVs only."
+            f"Extracted data at {root} is not inference-ready. "
+            "Need **Josh_Receptor_Features** plus **ML_code**, or pockets plus "
+            "**ligand_feature_lookup.joblib** in the repo."
         )
 
     _merge_extracted_tree(staging, base)
     shutil.rmtree(staging, ignore_errors=True)
 
     root = _find_gpcr_data_root(base, subdir_hint=subdir_hint)
-    if not root or not _is_manuscript_ready_gpcr_root(root):
-        raise FileNotFoundError(f"Data merge into {base} did not produce a manuscript-ready tree.")
+    if not root or not _is_inference_ready_gpcr_root(root):
+        raise FileNotFoundError(f"Data merge into {base} did not produce an inference-ready tree.")
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(str(root), encoding="utf-8")
     return str(root)
 
 
 def _log_manuscript_debug(prefix: str = "post-bootstrap") -> None:
+    """Stdout-only status (no joblib load)."""
     try:
-        from src.gpcr.manuscript_features import manuscript_debug_status
+        from src.gpcr.manuscript_features import ligand_lookup_meta, ligand_lookup_entry_count
 
-        dbg = manuscript_debug_status(PROJECT_ROOT)
-        msg = " ".join(f"{k}={v}" for k, v in dbg.items())
-        print(f"[manuscript-debug:{prefix}] {msg}")
+        gpcr = os.environ.get("GPCR_DATA_ROOT", "")
+        ml = os.environ.get("MANUSCRIPT_ML_ROOT", "")
+        meta = ligand_lookup_meta(PROJECT_ROOT)
+        print(
+            f"[manuscript-debug:{prefix}] "
+            f"gpcr_data_root={gpcr} ml_root={ml} "
+            f"lookup_entries={ligand_lookup_entry_count(PROJECT_ROOT)} "
+            f"lookup_source={meta.get('source', '?')}"
+        )
     except Exception as exc:
         print(f"[manuscript-debug:{prefix}] status unavailable: {exc}")
 
 
-
-
-def _try_use_cached_gpcr_data(data_dir_name: str, subdir_hint: str) -> bool:
-    """Reuse a previous extract under runtime_data (avoids re-downloading on reboot)."""
+def _resolve_inference_gpcr_root(data_dir_name: str, subdir_hint: str) -> Optional[Path]:
+    """Find an on-disk GPCR data tree without downloading."""
+    current = os.environ.get("GPCR_DATA_ROOT", "").strip()
+    if current:
+        p = Path(current)
+        if _is_inference_ready_gpcr_root(p):
+            return p
+    if _is_inference_ready_gpcr_root(PROJECT_ROOT):
+        return PROJECT_ROOT.resolve()
     base = (PROJECT_ROOT / data_dir_name).resolve()
     for candidate in (base, PROJECT_ROOT):
         root = _find_gpcr_data_root(candidate, subdir_hint=subdir_hint)
         if root and _is_inference_ready_gpcr_root(root):
-            _apply_gpcr_data_root(root)
-            print(f"[gpcr-data] Using cached GPCR_DATA_ROOT={root}")
-            _log_manuscript_debug("cached")
-            return True
-    return False
+            return root
+    return None
+
+
+def _apply_inference_root_if_ready(data_dir_name: str, subdir_hint: str) -> bool:
+    root = _resolve_inference_gpcr_root(data_dir_name, subdir_hint)
+    if root is None:
+        return False
+    _apply_gpcr_data_root(root)
+    _log_manuscript_debug("ready")
+    return True
 
 
 def _resolve_data_download_source() -> tuple[str, str]:
@@ -503,22 +596,15 @@ def _resolve_data_download_source() -> tuple[str, str]:
 
 def _bootstrap_cloud_gpcr_data() -> bool:
     """
-    On Streamlit Cloud: download DATA_ZIP_URL, extract, set GPCR_DATA_ROOT / MANUSCRIPT_ML_ROOT.
-    Skipped when the current root already has Josh_Receptor_Features and ML_code.
-    Returns True when manuscript-ready data is available.
+    Ensure GPCR_DATA_ROOT is set. On Cloud, never auto-download — user must click a button.
     """
-    zip_url, data_source_key = _resolve_data_download_source()
-    current = os.environ.get("GPCR_DATA_ROOT", "").strip()
     data_dir_name = _read_deploy_cfg("DATA_DIR", "runtime_data")
     subdir_hint = _read_deploy_cfg("DATA_EXTRACTED_SUBDIR", "")
 
-    if current and _is_inference_ready_gpcr_root(Path(current)):
-        _apply_gpcr_data_root(Path(current))
-        _log_manuscript_debug("ready")
+    if _apply_inference_root_if_ready(data_dir_name, subdir_hint):
         return True
 
-    if _try_use_cached_gpcr_data(data_dir_name, subdir_hint):
-        return True
+    zip_url, data_source_key = _resolve_data_download_source()
 
     if _has_bundled_ligand_lookup():
         print(
@@ -527,66 +613,53 @@ def _bootstrap_cloud_gpcr_data() -> bool:
         )
 
     if not zip_url:
-        if current and _is_valid_gpcr_data_root(Path(current)):
-            _apply_gpcr_data_root(Path(current))
         _log_manuscript_debug("no-zip-url")
-        root = Path(os.environ.get("GPCR_DATA_ROOT", "."))
-        if _has_bundled_ligand_lookup() and not _is_valid_gpcr_data_root(root):
+        root = _resolve_inference_gpcr_root(data_dir_name, subdir_hint)
+        if root is None and _has_bundled_ligand_lookup():
             st.error(
                 "Ligand lookup is in the repo, but **Josh_Receptor_Features** is missing. "
                 "Set **DATA_DRIVE_FILE_ID** to a **slim** zip (pockets + ML_code only), "
                 "or add pocket CSVs under the app."
             )
-        return _is_inference_ready_gpcr_root(root)
+        return root is not None
 
-    if _is_streamlit_cloud():
-        if _has_bundled_ligand_lookup():
-            st.warning(
-                "Downloading/extracting a **large** data zip can exceed Streamlit's ~1 GB RAM and crash "
-                "the app (log stops right after **100%** download). With **ligand_feature_lookup.joblib** "
-                "in the repo, use a **slim** zip: **Josh_Receptor_Features** + **ML_code** only — "
-                "remove the 1.3 GB full inference zip from secrets."
-            )
-        else:
-            st.warning(
-                "First visit downloads a large zip. Streamlit Cloud free tier (~1 GB RAM) "
-                "may kill the app during unzip. Prefer **ligand_feature_lookup.joblib** in git LFS "
-                "plus a slim pockets zip."
-            )
-
-    try:
-        with st.status("Downloading GPCR data (first run may take several minutes)...", expanded=True):
-            preview = zip_url if len(zip_url) <= 72 else zip_url[:69] + "..."
-            st.caption(f"Data source: **{data_source_key}** → `{preview}`")
-            if data_source_key == "DATA_DRIVE_FILE_ID":
-                st.caption("Direct HTTPS host (Hugging Face): set **DATA_ZIP_URL** instead of Drive.")
-            resolved = _prepare_cloud_gpcr_data(zip_url, data_dir_name, subdir_hint)
-            _apply_gpcr_data_root(Path(resolved))
-            st.write(f"Using **GPCR_DATA_ROOT**: `{resolved}`")
-            ml = os.environ.get("MANUSCRIPT_ML_ROOT", "")
-            if ml:
-                st.write(f"Using **MANUSCRIPT_ML_ROOT**: `{ml}`")
-            _log_manuscript_debug("after-download")
-            if not os.environ.get("MANUSCRIPT_ML_ROOT", "").strip():
-                st.warning(
-                    "Downloaded data has no **ML_code** folder — manuscript predictions will be inaccurate."
+    st.warning(
+        "Pocket CSVs are not on disk yet. On Streamlit Cloud (~1 GB RAM), download only the "
+        "**~137 MB** slim zip — not a **~1.3 GB** full bundle."
+    )
+    if st.button("Download pocket data (one-time)", type="primary", key="gpcr_download_pockets_btn"):
+        try:
+            with st.status("Downloading GPCR data (first run may take several minutes)...", expanded=True):
+                preview = zip_url if len(zip_url) <= 72 else zip_url[:69] + "..."
+                st.caption(f"Data source: **{data_source_key}** → `{preview}`")
+                resolved = _prepare_cloud_gpcr_data(zip_url, data_dir_name, subdir_hint)
+                _apply_gpcr_data_root(Path(resolved))
+                st.write(f"Using **GPCR_DATA_ROOT**: `{resolved}`")
+                ml = os.environ.get("MANUSCRIPT_ML_ROOT", "")
+                if ml:
+                    st.write(f"Using **MANUSCRIPT_ML_ROOT**: `{ml}`")
+                _log_manuscript_debug("after-download")
+                if not os.environ.get("MANUSCRIPT_ML_ROOT", "").strip():
+                    st.warning(
+                        "Downloaded data has no **ML_code** folder — receptor features use pocket CSV fallback."
+                    )
+            st.rerun()
+        except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError, OSError) as exc:
+            st.error(f"Could not prepare GPCR data from {data_source_key}: {exc}")
+            err_text = str(exc).lower()
+            if "too large for streamlit cloud" in err_text or "1.3 gb" in err_text or "too large for cloud" in err_text:
+                st.error(
+                    "Zip is too large for Cloud RAM. Upload **GPCRtryagain-inference-slim.zip** (~137 MB)."
                 )
-        return True
-    except (urllib.error.URLError, zipfile.BadZipFile, RuntimeError, FileNotFoundError, OSError) as exc:
-        st.error(f"Could not prepare GPCR data from {data_source_key}: {exc}")
-        err_text = str(exc).lower()
-        if "too many users" in err_text or "download quota" in err_text:
-            st.warning(
-                "**Google Drive quota:** automated downloads are blocked for this file today. "
-                "Make a **copy** of the zip in Drive (new file ID), wait 24h, or upload the zip to "
-                "**Hugging Face** and set `DATA_ZIP_URL` to the `.../resolve/main/....zip` link."
+            if "too many users" in err_text or "download quota" in err_text:
+                st.warning(
+                    "**Google Drive quota:** make a **copy** of the zip in Drive (new file ID) or use Hugging Face **DATA_ZIP_URL**."
+                )
+            st.info(
+                "Secrets: `DATA_DRIVE_FILE_ID` or `DATA_ZIP_URL`, `DATA_DIR`, "
+                "`DATA_EXTRACTED_SUBDIR` = `GPCRtryagain-inference-slim`."
             )
-        st.info(
-            "Secrets: `DATA_DRIVE_FILE_ID` (Drive id) or `DATA_ZIP_URL` (any direct https zip URL), "
-            "`DATA_DIR`, `DATA_EXTRACTED_SUBDIR` (e.g. GPCRtryagain - Delete - Copy). "
-            "For Cloud, a slim zip with only **Josh_Receptor_Features** + **ML_code** uses less RAM."
-        )
-        return False
+    return False
 
 
 import pandas as pd
@@ -615,7 +688,6 @@ from src.gpcr.receptor_names import receptor_display_options, resolve_receptor_f
 from src.gpcr.manuscript_bundle import manuscript_bundle_available, scan_manuscript_artifacts
 from src.gpcr.manuscript_features import manuscript_debug_status
 from src.gpcr.structure_view import py3dmol_available
-from src.gpcr.docking import compute_receptor_grid_params, run_single_receptor_docking
 
 try:
     import streamlit.components.v1 as st_components
@@ -1097,6 +1169,17 @@ def render_demo_prediction_page():
 
 def render_gpcr_prediction_page():
     """Render the GPCR Ligand Functional Activity Prediction page."""
+    if _is_streamlit_cloud() and not st.session_state.get("_gpcr_predict_unlocked"):
+        st.title("GPCR Ligand Functional Activity Prediction")
+        st.info(
+            "This page loads **large models** (~170 MB) and a **ligand lookup** (~346 MB on first predict). "
+            "Streamlit Cloud has **~1 GB RAM** — the app opens in steps so the tab does not crash immediately."
+        )
+        if st.button("Continue to prediction setup", type="primary", key="gpcr_unlock_tab"):
+            st.session_state["_gpcr_predict_unlocked"] = True
+            st.rerun()
+        return
+
     if not _bootstrap_cloud_gpcr_data():
         st.error(
             "Training data is not ready. If **ligand_feature_lookup.joblib** is in the repo, set "
@@ -1177,7 +1260,23 @@ def render_gpcr_prediction_page():
 
     if evaluation_regime and _ms_regimes.get(evaluation_regime):
         available_models = list(_ms_regimes[evaluation_regime].keys())
-        # RF first (default) — ensemble loads RF+XGB+LGB+meta and often OOMs on Cloud.
+        cloud_ok = ("rf", "lightgbm") if _is_streamlit_cloud() else ("rf", "lightgbm", "xgboost", "ensemble")
+        if _is_streamlit_cloud():
+            dropped = [m for m in available_models if m not in cloud_ok]
+            if dropped:
+                st.caption(
+                    f"On Streamlit Cloud, **{', '.join(dropped)}** is hidden (loads too much RAM). "
+                    "Use **Random Forest**."
+                )
+        available_models = [m for m in available_models if m in cloud_ok]
+        if _is_streamlit_cloud() and "rf" not in available_models:
+            st.error(
+                "**Random Forest** is not deployed (only a placeholder `model_seed42.pkl` on GitHub, or LFS pull failed). "
+                "Run `scripts/export_manuscript_models.py` locally, then `git lfs push` for "
+                "`artifacts/manuscript/independent_ligand/rf/model_seed42.pkl`."
+            )
+            return
+        # RF first (default) — ensemble loads RF+XGB+LGB+meta and OOMs on Cloud (~1 GB RAM).
         model_options = [_model_labels[m] for m in ("rf", "lightgbm", "xgboost", "ensemble") if m in available_models]
         default_model_ix = 0
     else:
@@ -1217,6 +1316,18 @@ def render_gpcr_prediction_page():
         )
         return
 
+    if _is_streamlit_cloud() and model_type != "rf":
+        st.warning(
+            "On Streamlit Cloud, use **Random Forest** only. Ensemble / XGB / LGB together exceed ~1 GB RAM."
+        )
+
+    if _is_streamlit_cloud() and not st.session_state.get("_predictor_loaded"):
+        if st.button("Load model (required once per session)", type="primary", key="load_predictor_btn"):
+            st.session_state["_predictor_loaded"] = True
+            st.rerun()
+        st.caption("Data is ready. Load the model before predicting (saves RAM on Cloud).")
+        return
+
     try:
         predictor = load_active_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
     except Exception as e:
@@ -1251,6 +1362,11 @@ def render_gpcr_prediction_page():
     )
     if _mode == "manuscript":
         st.caption("Install **mordred** for best ligand descriptor parity with enriched training CSVs.")
+        if _is_streamlit_cloud():
+            st.caption(
+                "Cloud RAM: ~772 MB LFS at clone + model load + **ligand lookup** (~346 MB on first predict). "
+                "If the app dies after ~1 min, check logs for **Ensemble** / **healthz** — not always a Drive download."
+            )
         dbg = manuscript_debug_status(HANDOFF_DIR)
         # Keep a plain stdout line so Streamlit Cloud logs capture this state.
         print(
@@ -1464,6 +1580,8 @@ def render_gpcr_prediction_page():
                 str(last_pred["receptor"]),
                 get_gpcr_data_root(),
             ) or str(last_pred["receptor"])
+            from src.gpcr.docking import compute_receptor_grid_params, run_single_receptor_docking
+
             rec_center, rec_size, grid_help = compute_receptor_grid_params(dock_folder)
 
             with st.expander("Docking search box (recommended vs. custom)", expanded=False):
@@ -1683,6 +1801,8 @@ def main():
 
     if st.sidebar.button("GPCR Ligand Functional Activity Prediction", use_container_width=True, key="nav_prediction"):
         st.session_state.current_page = "GPCR Ligand Functional Activity Prediction"
+        if _is_streamlit_cloud():
+            st.session_state.pop("_predictor_loaded", None)
 
     st.sidebar.markdown("---")
 
