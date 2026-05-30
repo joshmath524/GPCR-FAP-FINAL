@@ -37,6 +37,17 @@ def _manuscript_root(project_root: Path) -> Path:
     return project_root / "artifacts" / "manuscript"
 
 
+def _cloud_lite_mode() -> bool:
+    """Streamlit Cloud: skip Mordred, workbooks, and other RAM-heavy inference paths."""
+    if os.environ.get("GPCR_CLOUD_LITE", "").strip().lower() in ("0", "false", "no"):
+        return False
+    if os.environ.get("GPCR_CLOUD_LITE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if Path("/mount/src").is_dir():
+        return True
+    return str(os.environ.get("STREAMLIT_RUNTIME_ENVIRONMENT", "")).strip().lower() == "cloud"
+
+
 def load_feature_columns(project_root: Path) -> List[str]:
     manifest_path = _manuscript_root(project_root) / "manifest.json"
     if not manifest_path.exists():
@@ -185,17 +196,28 @@ def _ligand_row_for_smiles(
     canon: str,
     mol: Chem.Mol,
 ) -> Dict[str, float]:
-    from .new_workbook_ligand import ligand_dict_from_new_workbooks
+    from .ligand_enrichment import compute_rdkit_2d_descriptors
 
-    lookup_row, _ = _lookup_row_for_smiles(project_root, canon)
+    lookup_row, lookup_src = _lookup_row_for_smiles(project_root, canon)
     row: Dict[str, float] = dict(lookup_row)
-    wb = ligand_dict_from_new_workbooks(receptor_input, canon)
-    if wb:
-        row.update(wb)
-    computed = build_ligand_descriptor_dict(canon, mol=mol) or {}
+    if not _cloud_lite_mode():
+        from .new_workbook_ligand import ligand_dict_from_new_workbooks
+
+        wb = ligand_dict_from_new_workbooks(receptor_input, canon)
+        if wb:
+            row.update(wb)
+    # Training lookup already has ~3k+ ligand columns — skip Mordred (large RAM spike on Cloud).
+    rich_lookup = lookup_src in ("sqlite", "lookup") and len(row) >= 400
+    if rich_lookup:
+        return row
+    use_mordred = not _cloud_lite_mode() and len(row) < 400
+    if use_mordred:
+        computed = build_ligand_descriptor_dict(canon, mol=mol, include_mordred=True) or {}
+    else:
+        computed = compute_rdkit_2d_descriptors(mol)
     for col, val in computed.items():
         if col not in row:
-            row[col] = val
+            row[col] = float(val)
     return row
 
 def _receptor_features(receptor_input: str, data_root: Path) -> Optional[Dict[str, float]]:

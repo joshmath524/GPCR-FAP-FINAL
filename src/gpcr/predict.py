@@ -514,8 +514,8 @@ class GPCRPredictor:
         # Predicted class (highest probability)
         predicted_class_id = int(np.argmax(mean_probs))
         predicted_class = self.class_names[predicted_class_id]
-        
-        return PredictResult(
+
+        result = PredictResult(
             is_valid=True,
             receptor=receptor,
             ligand_smiles=ligand_smiles,
@@ -530,6 +530,14 @@ class GPCRPredictor:
             threshold=self.threshold,
             error="",
         )
+        if os.environ.get("GPCR_CLOUD_LITE", "").strip().lower() in ("1", "true", "yes") or (
+            str(os.environ.get("STREAMLIT_RUNTIME_ENVIRONMENT", "")).strip().lower() == "cloud"
+        ):
+            del X, features, all_probs, mean_probs, std_probs
+            import gc
+
+            gc.collect()
+        return result
 
 
 def load_predictor(

@@ -136,12 +136,14 @@ def build_ligand_descriptor_dict(
     smiles: str,
     *,
     mol: Optional[Chem.Mol] = None,
+    include_mordred: bool = True,
 ) -> Optional[Dict[str, float]]:
-    """RDKit + Mordred dict for one canonical SMILES."""
+    """RDKit + optional Mordred dict for one canonical SMILES."""
     if mol is None:
         mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
     out = compute_rdkit_2d_descriptors(mol)
-    out.update(compute_mordred_descriptors(mol))
+    if include_mordred:
+        out.update(compute_mordred_descriptors(mol))
     return out

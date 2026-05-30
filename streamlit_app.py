@@ -685,6 +685,7 @@ def _is_streamlit_cloud() -> bool:
 _CLOUD = _is_streamlit_cloud()
 if _CLOUD:
     os.environ.setdefault("GPCR_JOBLIB_MMAP", "1")
+    os.environ.setdefault("GPCR_CLOUD_LITE", "1")
     # Per-SMILES SQLite lookup avoids loading the full joblib dict into RAM.
     _sq = _bundled_ligand_lookup_sqlite_path()
     if not (_sq.is_file() and _sq.stat().st_size > 100_000):
@@ -1521,30 +1522,35 @@ def render_gpcr_prediction_page():
             with prob_col3:
                 st.metric("P(Inactive)", f"{float(pred['prob_inactive']):.4f}")
 
-            import plotly.graph_objects as go
-            fig = go.Figure(
-                data=[
-                    go.Bar(
-                        x=["Agonist", "Antagonist", "Inactive"],
-                        y=[float(pred["prob_agonist"]), float(pred["prob_antagonist"]), float(pred["prob_inactive"])],
-                        marker_color=["#7E57C2", "#673AB7", "#512DA8"],
-                        text=[
-                            f"{float(pred['prob_agonist']):.3f}",
-                            f"{float(pred['prob_antagonist']):.3f}",
-                            f"{float(pred['prob_inactive']):.3f}",
-                        ],
-                        textposition="auto",
-                    )
-                ]
-            )
-            fig.update_layout(
-                title="Class Probability Distribution",
-                xaxis_title="Class",
-                yaxis_title="Probability",
-                yaxis_range=[0, 1],
-                height=400,
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            probs = {
+                "Agonist": float(pred["prob_agonist"]),
+                "Antagonist": float(pred["prob_antagonist"]),
+                "Inactive": float(pred["prob_inactive"]),
+            }
+            if _CLOUD:
+                st.bar_chart(probs, height=320)
+            else:
+                import plotly.graph_objects as go
+
+                fig = go.Figure(
+                    data=[
+                        go.Bar(
+                            x=list(probs.keys()),
+                            y=list(probs.values()),
+                            marker_color=["#7E57C2", "#673AB7", "#512DA8"],
+                            text=[f"{v:.3f}" for v in probs.values()],
+                            textposition="auto",
+                        )
+                    ]
+                )
+                fig.update_layout(
+                    title="Class Probability Distribution",
+                    xaxis_title="Class",
+                    yaxis_title="Probability",
+                    yaxis_range=[0, 1],
+                    height=400,
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
             std_err = pred.get("prob_std_error")
             if std_err is not None:
@@ -1567,6 +1573,8 @@ def render_gpcr_prediction_page():
 
         def _run_single_predict() -> None:
             if receptor_selected and ligand_to_use:
+                if _CLOUD:
+                    _gc.collect()
                 result = predict_single(
                     receptor_selected,
                     ligand_to_use,
@@ -1612,7 +1620,12 @@ def render_gpcr_prediction_page():
                 _render_single_prediction_from_session(last_pred)
 
         last_pred = st.session_state.get("last_single_prediction")
-        if last_pred:
+        if last_pred and _CLOUD and not st.session_state.get("gpcr_show_docking"):
+            if st.button("Show docking tools (optional, uses extra RAM)", key="gpcr_enable_docking"):
+                st.session_state["gpcr_show_docking"] = True
+                st.rerun()
+
+        if last_pred and (not _CLOUD or st.session_state.get("gpcr_show_docking")):
             st.divider()
             st.subheader("Docking + receptor-ligand visualization")
             st.caption(
