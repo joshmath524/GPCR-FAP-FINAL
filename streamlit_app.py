@@ -676,6 +676,8 @@ def _is_streamlit_cloud() -> bool:
 
 
 _CLOUD = _is_streamlit_cloud()
+if _CLOUD:
+    os.environ.setdefault("GPCR_JOBLIB_MMAP", "1")
 
 from src.gpcr.predict import (
     predict_single,
@@ -839,6 +841,17 @@ st.markdown("""
 # ============================================================================
 # PREDICTOR (single in-memory slot — avoids OOM on Streamlit Cloud)
 # ============================================================================
+
+def _reset_predictor_session() -> None:
+    for key in (
+        "_predictor_loaded",
+        "_active_predictor",
+        "_predictor_key",
+        "_cloud_load_requested",
+    ):
+        st.session_state.pop(key, None)
+    _gc.collect()
+
 
 def load_active_predictor(
     model_type: Optional[str] = None,
@@ -1177,6 +1190,7 @@ def render_gpcr_prediction_page():
         )
         if st.button("Continue to prediction setup", type="primary", key="gpcr_unlock_tab"):
             st.session_state["_gpcr_predict_unlocked"] = True
+            _reset_predictor_session()
             st.rerun()
         return
 
@@ -1260,7 +1274,7 @@ def render_gpcr_prediction_page():
 
     if evaluation_regime and _ms_regimes.get(evaluation_regime):
         available_models = list(_ms_regimes[evaluation_regime].keys())
-        cloud_ok = ("rf", "lightgbm") if _is_streamlit_cloud() else ("rf", "lightgbm", "xgboost", "ensemble")
+        cloud_ok = ("rf",) if _is_streamlit_cloud() else ("rf", "lightgbm", "xgboost", "ensemble")
         if _is_streamlit_cloud():
             dropped = [m for m in available_models if m not in cloud_ok]
             if dropped:
@@ -1317,31 +1331,56 @@ def render_gpcr_prediction_page():
         return
 
     if _is_streamlit_cloud() and model_type != "rf":
-        st.warning(
-            "On Streamlit Cloud, use **Random Forest** only. Ensemble / XGB / LGB together exceed ~1 GB RAM."
-        )
-
-    if _is_streamlit_cloud() and not st.session_state.get("_predictor_loaded"):
-        if st.button("Load model (required once per session)", type="primary", key="load_predictor_btn"):
-            st.session_state["_predictor_loaded"] = True
-            st.rerun()
-        st.caption("Data is ready. Load the model before predicting (saves RAM on Cloud).")
+        st.warning("On Streamlit Cloud, only **Random Forest** is available.")
         return
 
-    try:
-        predictor = load_active_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
-    except Exception as e:
-        st.error(f"Could not load {model_type_label} model: {e}")
-        if evaluation_regime:
-            st.info(
-                "Export models first: `docs/MANUSCRIPT_STREAMLIT_SETUP.md` and `scripts/export_manuscript_models.py`.\n"
-                f"Expected: `artifacts/manuscript/{evaluation_regime}/{model_type}/model_seed{seed}.pkl`"
-            )
+    predictor = None
+    if _is_streamlit_cloud():
+        _pred_key = (evaluation_regime or "", model_type or "", int(seed))
+        cached = st.session_state.get("_active_predictor")
+        if st.session_state.get("_predictor_key") == _pred_key and cached is not None:
+            predictor = cached
         else:
-            st.info(
-                "Ensure **./artifacts** contains demo subfolders (**demo_rf/**, etc.) with valid **model_seed0.pkl** "
-                "(placeholder tiny .pkl files are ignored)."
+            st.warning(
+                "Streamlit Cloud has **~1 GB RAM**. Loading the RF model uses **~400–700 MB** "
+                "on top of libraries already in memory. If the app disconnects after you click below, "
+                "you need a smaller exported model or a host with **≥2 GB RAM**."
             )
+            if st.button("Load Random Forest model", type="primary", key="load_predictor_btn"):
+                _gc.collect()
+                try:
+                    with st.spinner("Loading Random Forest…"):
+                        predictor = load_predictor(
+                            HANDOFF_DIR,
+                            model_type="rf",
+                            evaluation_regime=evaluation_regime,
+                            seed=seed,
+                        )
+                    st.session_state["_predictor_key"] = _pred_key
+                    st.session_state["_active_predictor"] = predictor
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Could not load Random Forest: {exc}")
+            st.caption("The rest of the form appears after the model loads successfully.")
+            return
+    else:
+        try:
+            predictor = load_active_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
+        except Exception as e:
+            st.error(f"Could not load {model_type_label} model: {e}")
+            if evaluation_regime:
+                st.info(
+                    "Export models first: `docs/MANUSCRIPT_STREAMLIT_SETUP.md` and `scripts/export_manuscript_models.py`.\n"
+                    f"Expected: `artifacts/manuscript/{evaluation_regime}/{model_type}/model_seed{seed}.pkl`"
+                )
+            else:
+                st.info(
+                    "Ensure **./artifacts** contains demo subfolders (**demo_rf/**, etc.) with valid **model_seed0.pkl** "
+                    "(placeholder tiny .pkl files are ignored)."
+                )
+            return
+
+    if predictor is None:
         return
 
     st.sidebar.markdown("### Model Info")
@@ -1360,37 +1399,23 @@ def render_gpcr_prediction_page():
         f"**ML bundle:** `{HANDOFF_DIR}` · **Pocket data:** `{_gdata or 'default'}` · "
         f"**Features:** {_efd if _efd is not None else '—'} dims"
     )
-    if _mode == "manuscript":
+    if _mode == "manuscript" and not _is_streamlit_cloud():
         st.caption("Install **mordred** for best ligand descriptor parity with enriched training CSVs.")
-        if _is_streamlit_cloud():
-            st.caption(
-                "Cloud RAM: ~772 MB LFS at clone + model load + **ligand lookup** (~346 MB on first predict). "
-                "If the app dies after ~1 min, check logs for **Ensemble** / **healthz** — not always a Drive download."
-            )
         dbg = manuscript_debug_status(HANDOFF_DIR)
-        # Keep a plain stdout line so Streamlit Cloud logs capture this state.
         print(
             "[manuscript-debug] "
             f"gpcr_data_root={dbg['gpcr_data_root']} "
             f"ml_root={dbg['ml_root']} "
-            f"ml_root_exists={dbg['ml_root_exists']} "
-            f"shared_utilities_imported={dbg['shared_utilities_imported']} "
-            f"manifest_exists={dbg['manifest_exists']} "
-            f"manifest_feature_count={dbg['manifest_feature_count']} "
-            f"ligand_lookup_exists={dbg['ligand_lookup_exists']} "
-            f"ligand_lookup_entries={dbg['ligand_lookup_entries']} "
-            f"ligand_lookup_source={dbg['ligand_lookup_source']}"
+            f"ligand_lookup_entries={dbg['ligand_lookup_entries']}"
         )
         with st.sidebar.expander("Manuscript feature diagnostics", expanded=False):
             st.write(f"GPCR data root: `{dbg['gpcr_data_root']}`")
-            st.write(f"MANUSCRIPT_ML_ROOT: `{dbg['ml_root'] or '(not set)'}`")
-            st.write(f"ML root exists: `{dbg['ml_root_exists']}`")
-            st.write(f"shared_utilities import: `{dbg['shared_utilities_imported']}`")
-            st.write(f"manifest.json exists: `{dbg['manifest_exists']}`")
-            st.write(f"manifest feature count: `{dbg['manifest_feature_count']}`")
-            st.write(f"ligand lookup exists: `{dbg['ligand_lookup_exists']}`")
             st.write(f"ligand lookup entries: `{dbg['ligand_lookup_entries']}`")
-            st.write(f"ligand lookup source: `{dbg['ligand_lookup_source']}`")
+    elif _mode == "manuscript" and _is_streamlit_cloud():
+        st.caption(
+            "First **Predict** loads the ligand lookup (~346 MB on disk). If the app dies when you predict, "
+            "RAM limit was exceeded — not a bug in the tab itself."
+        )
 
     st.divider()
 
@@ -1802,7 +1827,7 @@ def main():
     if st.sidebar.button("GPCR Ligand Functional Activity Prediction", use_container_width=True, key="nav_prediction"):
         st.session_state.current_page = "GPCR Ligand Functional Activity Prediction"
         if _is_streamlit_cloud():
-            st.session_state.pop("_predictor_loaded", None)
+            _reset_predictor_session()
 
     st.sidebar.markdown("---")
 

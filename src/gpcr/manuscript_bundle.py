@@ -6,6 +6,7 @@ Artifacts are produced by scripts/export_manuscript_models.py in the training wo
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -84,6 +85,17 @@ class StackingEnsemblePredictor:
         meta_probs = self.meta_model.predict_proba(meta_x)
         meta_classes = getattr(self.meta_model, "classes_", self.classes_)
         return _align_proba(meta_probs, meta_classes, self.n_classes)
+
+
+def _joblib_load_model(path: Path) -> Any:
+    """Load estimator; mmap on Cloud (GPCR_JOBLIB_MMAP=1) to reduce RAM spikes."""
+    use_mmap = os.environ.get("GPCR_JOBLIB_MMAP", "").strip().lower() in ("1", "true", "yes")
+    if use_mmap:
+        try:
+            return joblib.load(path, mmap_mode="r")
+        except (TypeError, ValueError, OSError):
+            pass
+    return joblib.load(path)
 
 
 def _valid_model_path(path: Path, min_bytes: int = 50_000) -> bool:
@@ -250,7 +262,7 @@ def load_manuscript_models(
                 f"Run scripts/export_manuscript_models.py with --regime loro."
             )
         model_path = path if path.suffix == ".pkl" else path / f"model_seed{seed}.pkl"
-        return [joblib.load(model_path)], manifest
+        return [_joblib_load_model(model_path)], manifest
 
     model_dir = resolve_manuscript_model_dir(project_root, regime, mt, seed=seed)
     if model_dir is None:
@@ -263,17 +275,17 @@ def load_manuscript_models(
         for name in (f"stacking_seed{seed}.pkl", f"model_seed{seed}.pkl"):
             p = model_dir / name
             if _valid_model_path(p, min_bytes=100_000):
-                return [joblib.load(p)], manifest
+                return [_joblib_load_model(p)], manifest
         raise FileNotFoundError(f"No stacking bundle in {model_dir}")
 
     models = []
     seed_path = model_dir / f"model_seed{seed}.pkl"
     if _valid_model_path(seed_path):
-        models.append(joblib.load(seed_path))
+        models.append(_joblib_load_model(seed_path))
     else:
         for p in sorted(model_dir.glob("model_seed*.pkl")):
             if _valid_model_path(p):
-                models.append(joblib.load(p))
+                models.append(_joblib_load_model(p))
     if not models:
         raise FileNotFoundError(f"No valid model_seed*.pkl in {model_dir}")
     return models, manifest
