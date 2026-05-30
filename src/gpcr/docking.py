@@ -481,6 +481,54 @@ def _is_git_lfs_pointer(text: str) -> bool:
     return "git-lfs.github.com" in head or head.startswith("version https://git-lfs")
 
 
+def _is_lfs_pointer_file(path: Path) -> bool:
+    if not path.is_file():
+        return True
+    if path.stat().st_size >= 1000:
+        return False
+    try:
+        return _is_git_lfs_pointer(path.read_text(encoding="utf-8", errors="ignore"))
+    except OSError:
+        return True
+
+
+def _bundled_receptor_pdb_dir(project_root: Path, receptor_folder: str) -> Path:
+    return project_root / "docking_assets" / "receptor_pdbs" / receptor_folder.strip()
+
+
+def resolve_docking_receptor_pdb(
+    receptor_folder: str,
+    project_root: Optional[Path] = None,
+) -> Tuple[Optional[Path], str]:
+    """
+    Path to a real receptor-only PDB for SMINA (not a Git LFS pointer).
+
+    Prefers ``docking_assets/receptor_pdbs/<folder>/`` (shipped with the app on Cloud).
+    """
+    root = project_root or _resolve_project_root()
+    from .receptor_names import resolve_receptor_folder
+
+    data_root = Path(os.environ.get("GPCR_DATA_ROOT", "").strip() or root)
+    folder = resolve_receptor_folder(receptor_folder, data_root) or str(receptor_folder).strip()
+
+    bundled_dir = _bundled_receptor_pdb_dir(root, folder)
+    if bundled_dir.is_dir():
+        for candidate in sorted(bundled_dir.glob("*_receptor_only.pdb")):
+            if not _is_lfs_pointer_file(candidate):
+                return candidate, "bundled"
+
+    rec_path, _ = resolve_receptor_structure_paths(folder)
+    if rec_path is not None and rec_path.is_file() and not _is_lfs_pointer_file(rec_path):
+        return rec_path, "josh"
+    if rec_path is not None and rec_path.is_file() and _is_lfs_pointer_file(rec_path):
+        return None, (
+            f"`{rec_path.name}` is a Git LFS pointer ({rec_path.stat().st_size} bytes), not a real PDB. "
+            "Redeploy with `docking_assets/receptor_pdbs/` (run "
+            "`py -3 scripts/bundle_receptor_pdbs_for_docking.py`) or real structures in your data zip."
+        )
+    return None, f"No receptor-only PDB found for `{folder}`."
+
+
 def _coords_from_pdb_line_split(line: str) -> Optional[Tuple[float, float, float]]:
     """Fallback when fixed-width columns are misaligned (some exports)."""
     parts = line.split()
@@ -880,11 +928,11 @@ def run_single_receptor_docking(
             html=None,
         )
 
-    rec_path, lig_path = resolve_receptor_structure_paths(receptor_folder)
-    if rec_path is None or not rec_path.is_file():
+    rec_path, rec_src = resolve_docking_receptor_pdb(receptor_folder, project_root=project_root)
+    if rec_path is None:
         return DockingResult(
             ok=False,
-            message="No receptor-only PDB found for selected receptor.",
+            message=rec_src,
             receptor_name=receptor_folder,
             canonical_smiles=canonical_smiles,
             center=(0.0, 0.0, 0.0),
@@ -896,6 +944,7 @@ def run_single_receptor_docking(
             log_path=None,
             html=None,
         )
+    _, lig_path = resolve_receptor_structure_paths(receptor_folder)
     manual_grid = grid_center is not None and grid_size is not None
 
     if manual_grid:
