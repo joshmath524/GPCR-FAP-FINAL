@@ -1,93 +1,133 @@
 """
-Minimal manuscript RF inference for Streamlit Cloud (~1 GB RAM).
+Minimal manuscript inference for Streamlit Cloud (~1 GB RAM).
 
-Avoids GPCRPredictor / load_predictor overhead; loads only model_seed*_cloud.pkl.
+Loads one model at a time (RF cloud / XGB / LGB), predicts, then frees memory.
+Does not use GPCRPredictor. Ensemble is not supported on Cloud.
 """
 from __future__ import annotations
 
 import gc
-import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
-import joblib
 import numpy as np
 
-from .manuscript_bundle import _align_proba
+from .manuscript_bundle import _align_proba, _joblib_load_model
 from .manuscript_features import build_manuscript_feature_row, load_feature_columns
 from .predict import PredictResult, _canonicalize_smiles
 
+CloudModelType = Literal["rf", "lightgbm", "xgboost"]
+CLOUD_MODEL_TYPES = ("rf", "lightgbm", "xgboost")
 
-def _cloud_rf_path(project_root: Path, regime: str, seed: int) -> Path:
-    return (
-        project_root
-        / "artifacts"
-        / "manuscript"
-        / regime
-        / "rf"
-        / f"model_seed{seed}_cloud.pkl"
+
+def cloud_model_path(
+    project_root: Path,
+    evaluation_regime: str,
+    model_type: str,
+    seed: int = 42,
+) -> Path:
+    mt = model_type.strip().lower()
+    folder = {"rf": "rf", "lightgbm": "lightgbm", "xgboost": "xgboost"}.get(mt)
+    if folder is None:
+        raise ValueError(f"Unsupported cloud model_type: {model_type}")
+    name = f"model_seed{seed}_cloud.pkl" if mt == "rf" else f"model_seed{seed}.pkl"
+    return project_root / "artifacts" / "manuscript" / evaluation_regime / folder / name
+
+
+def cloud_model_ready(
+    project_root: Path,
+    evaluation_regime: str,
+    model_type: str,
+    seed: int = 42,
+    *,
+    min_bytes: int = 50_000,
+) -> bool:
+    if model_type.strip().lower() not in CLOUD_MODEL_TYPES:
+        return False
+    path = cloud_model_path(project_root, evaluation_regime, model_type, seed)
+    return path.is_file() and path.stat().st_size >= min_bytes
+
+
+def _invalid(
+    *,
+    receptor: str,
+    ligand_smiles: str,
+    canon: str,
+    error: str,
+) -> PredictResult:
+    return PredictResult(
+        is_valid=False,
+        receptor=receptor,
+        ligand_smiles=ligand_smiles,
+        canonical_smiles=canon,
+        predicted_class="Unknown",
+        class_id=-1,
+        prob_agonist=0.0,
+        prob_antagonist=0.0,
+        prob_inactive=0.0,
+        error=error,
     )
 
 
-def predict_cloud_rf(
+def _release_model(model: object) -> None:
+    if hasattr(model, "estimators_"):
+        model.estimators_ = []  # type: ignore[attr-defined]
+    del model
+
+
+def predict_cloud_manuscript(
     project_root: Path,
     receptor: str,
     ligand_smiles: str,
     evaluation_regime: str = "independent_ligand",
     seed: int = 42,
+    model_type: str = "rf",
 ) -> PredictResult:
     root = Path(project_root)
-    canon = _canonicalize_smiles(ligand_smiles)
-    if canon is None:
-        return PredictResult(
-            is_valid=False,
+    mt = model_type.strip().lower()
+    if mt not in CLOUD_MODEL_TYPES:
+        return _invalid(
             receptor=receptor,
             ligand_smiles=ligand_smiles,
-            canonical_smiles="",
-            predicted_class="Unknown",
-            class_id=-1,
-            prob_agonist=0.0,
-            prob_antagonist=0.0,
-            prob_inactive=0.0,
+            canon="",
+            error=f"Cloud supports rf, lightgbm, xgboost only (not {model_type}).",
+        )
+
+    canon = _canonicalize_smiles(ligand_smiles)
+    if canon is None:
+        return _invalid(
+            receptor=receptor,
+            ligand_smiles=ligand_smiles,
+            canon="",
             error="Invalid SMILES",
         )
 
-    model_path = _cloud_rf_path(root, evaluation_regime, seed)
-    if not model_path.is_file() or model_path.stat().st_size < 50_000:
-        return PredictResult(
-            is_valid=False,
+    model_path = cloud_model_path(root, evaluation_regime, mt, seed)
+    if not cloud_model_ready(root, evaluation_regime, mt, seed):
+        if mt == "rf":
+            hint = "Run scripts/shrink_rf_for_cloud.py and deploy model_seed*_cloud.pkl via Git LFS."
+        else:
+            hint = f"Deploy {model_path.name} under artifacts/manuscript/{evaluation_regime}/{mt}/."
+        return _invalid(
             receptor=receptor,
             ligand_smiles=ligand_smiles,
-            canonical_smiles=canon,
-            predicted_class="Unknown",
-            class_id=-1,
-            prob_agonist=0.0,
-            prob_antagonist=0.0,
-            prob_inactive=0.0,
-            error=(
-                f"Missing {model_path.name}. Run scripts/shrink_rf_for_cloud.py and deploy via Git LFS."
-            ),
+            canon=canon,
+            error=f"Missing {model_path.name}. {hint}",
         )
 
     cols = load_feature_columns(root)
     vec = build_manuscript_feature_row(root, receptor, canon, feature_columns=cols)
     if vec is None:
-        return PredictResult(
-            is_valid=False,
+        return _invalid(
             receptor=receptor,
             ligand_smiles=ligand_smiles,
-            canonical_smiles=canon,
-            predicted_class="Unknown",
-            class_id=-1,
-            prob_agonist=0.0,
-            prob_antagonist=0.0,
-            prob_inactive=0.0,
+            canon=canon,
             error="Could not build feature row (receptor pockets or ligand lookup).",
         )
 
-    model = None
+    model: Optional[object] = None
     try:
-        model = joblib.load(model_path)
+        model = _joblib_load_model(model_path)
         X = np.ascontiguousarray(vec.reshape(1, -1), dtype=np.float64)
         raw = model.predict_proba(X)
         probs = _align_proba(raw, model.classes_, n_classes=3)[0]
@@ -107,8 +147,24 @@ def predict_cloud_rf(
         )
     finally:
         if model is not None:
-            if hasattr(model, "estimators_"):
-                model.estimators_ = []
-            del model
+            _release_model(model)
         del vec
         gc.collect()
+
+
+def predict_cloud_rf(
+    project_root: Path,
+    receptor: str,
+    ligand_smiles: str,
+    evaluation_regime: str = "independent_ligand",
+    seed: int = 42,
+) -> PredictResult:
+    """Backward-compatible wrapper."""
+    return predict_cloud_manuscript(
+        project_root,
+        receptor,
+        ligand_smiles,
+        evaluation_regime=evaluation_regime,
+        seed=seed,
+        model_type="rf",
+    )

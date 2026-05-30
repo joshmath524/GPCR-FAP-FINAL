@@ -868,18 +868,21 @@ def _reset_predictor_session() -> None:
     _gc.collect()
 
 
-def _cloud_rf_artifact_ready(evaluation_regime: Optional[str], seed: int) -> bool:
+def _cloud_model_artifact_ready(
+    evaluation_regime: Optional[str],
+    model_type: str,
+    seed: int,
+) -> bool:
     if not evaluation_regime:
         return False
-    p = (
-        HANDOFF_DIR
-        / "artifacts"
-        / "manuscript"
-        / evaluation_regime
-        / "rf"
-        / f"model_seed{seed}_cloud.pkl"
+    from src.gpcr.cloud_predict import cloud_model_ready
+
+    return cloud_model_ready(
+        HANDOFF_DIR,
+        evaluation_regime,
+        model_type,
+        int(seed),
     )
-    return p.is_file() and p.stat().st_size > 50_000
 
 
 def _cloud_predict_ephemeral(
@@ -887,17 +890,19 @@ def _cloud_predict_ephemeral(
     ligand_smiles: str,
     evaluation_regime: Optional[str],
     seed: int,
+    model_type: str,
 ) -> dict:
-    """Minimal cloud inference (small RF only; no GPCRPredictor wrapper)."""
-    from src.gpcr.cloud_predict import predict_cloud_rf
+    """Load one cloud model, predict, free RAM (RF / XGB / LGB only)."""
+    from src.gpcr.cloud_predict import predict_cloud_manuscript
 
     _gc.collect()
-    result = predict_cloud_rf(
+    result = predict_cloud_manuscript(
         HANDOFF_DIR,
         receptor,
         ligand_smiles,
         evaluation_regime=evaluation_regime or "independent_ligand",
         seed=int(seed),
+        model_type=model_type,
     )
     st.session_state.pop("_active_predictor", None)
     st.session_state.pop("_predictor_key", None)
@@ -1338,13 +1343,17 @@ def render_gpcr_prediction_page():
 
     if evaluation_regime and _ms_regimes.get(evaluation_regime):
         available_models = list(_ms_regimes[evaluation_regime].keys())
-        cloud_ok = ("rf",) if _is_streamlit_cloud() else ("rf", "lightgbm", "xgboost", "ensemble")
+        cloud_ok = (
+            ("rf", "lightgbm", "xgboost")
+            if _is_streamlit_cloud()
+            else ("rf", "lightgbm", "xgboost", "ensemble")
+        )
         if _is_streamlit_cloud():
             dropped = [m for m in available_models if m not in cloud_ok]
             if dropped:
                 st.caption(
-                    f"On Streamlit Cloud, **{', '.join(dropped)}** is hidden (loads too much RAM). "
-                    "Use **Random Forest**."
+                    f"On Streamlit Cloud, **{', '.join(dropped)}** is hidden (~1 GB RAM). "
+                    "RF, LightGBM, and XGBoost load **one at a time** per Predict."
                 )
         available_models = [m for m in available_models if m in cloud_ok]
         if _is_streamlit_cloud() and "rf" not in available_models:
@@ -1394,32 +1403,40 @@ def render_gpcr_prediction_page():
         )
         return
 
-    if _is_streamlit_cloud() and model_type != "rf":
-        st.warning("On Streamlit Cloud, only **Random Forest** is available.")
+    if _is_streamlit_cloud() and model_type == "ensemble":
+        st.warning("Ensemble needs RF+XGB+LGB together — not available on Streamlit Cloud (~1 GB RAM).")
         return
 
     predictor = None
     cloud_ephemeral_mode = False
     if _is_streamlit_cloud():
-        cloud_path = (
-            HANDOFF_DIR
-            / "artifacts"
-            / "manuscript"
-            / (evaluation_regime or "independent_ligand")
-            / "rf"
-            / f"model_seed{seed}_cloud.pkl"
-        )
-        if not cloud_path.is_file() or cloud_path.stat().st_size < 50_000:
+        if not _cloud_model_artifact_ready(evaluation_regime, model_type, seed):
+            from src.gpcr.cloud_predict import cloud_model_path
+
+            expected = cloud_model_path(
+                HANDOFF_DIR,
+                evaluation_regime or "independent_ligand",
+                model_type,
+                int(seed),
+            )
             st.error(
-                f"**Missing `model_seed{seed}_cloud.pkl`** (small RF for Cloud). "
-                "On your PC run `py -3 scripts/shrink_rf_for_cloud.py`, then commit and "
-                "`git lfs push` the file under `artifacts/manuscript/.../rf/`. "
-                "The full `model_seed42.pkl` (1000 trees) cannot run on Streamlit Cloud."
+                f"**Missing** `{expected.name}` for **{model_type_label}**. "
+                + (
+                    "Run `py -3 scripts/shrink_rf_for_cloud.py` for RF."
+                    if model_type == "rf"
+                    else f"Export and `git lfs push` to `artifacts/manuscript/.../{model_type}/`."
+                )
             )
             return
         cloud_ephemeral_mode = True
+        _cloud_file = (
+            f"model_seed{seed}_cloud.pkl"
+            if model_type == "rf"
+            else f"model_seed{seed}.pkl"
+        )
         st.caption(
-            f"**Cloud:** uses `model_seed{seed}_cloud.pkl` only. RF loads on each Predict, then is freed."
+            f"**Cloud:** **{model_type_label}** (`{_cloud_file}`) loads only when you click **Predict**, "
+            "then memory is freed. Ensemble is not available here."
         )
     else:
         try:
@@ -1445,7 +1462,7 @@ def render_gpcr_prediction_page():
     if cloud_ephemeral_mode:
         st.sidebar.info(
             f"**Regime:** {regime_label}\n\n"
-            f"**Model:** {model_type_label} (cloud RF)\n\n"
+            f"**Model:** {model_type_label} (cloud, load per predict)\n\n"
             f"**Seed:** {seed}\n\n"
             f"**Feature mode:** manuscript"
         )
@@ -1483,8 +1500,7 @@ def render_gpcr_prediction_page():
         _sqlite = _bundled_ligand_lookup_sqlite_path()
         if _sqlite.is_file() and _sqlite.stat().st_size > 100_000:
             st.caption(
-                "**Cloud:** ligand lookup via **SQLite** + `model_seed42_cloud.pkl`. "
-                "Click **Predict** (RF loads briefly, then is freed)."
+                "**Cloud:** SQLite ligand lookup + one model (RF / XGB / LGB) loaded per **Predict**."
             )
         else:
             st.warning(
@@ -1641,6 +1657,7 @@ def render_gpcr_prediction_page():
                                 ligand_to_use,
                                 evaluation_regime,
                                 seed,
+                                model_type,
                             )
                         is_valid = bool(payload.get("is_valid"))
                         err_msg = str(payload.get("error") or "")
