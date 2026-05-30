@@ -36,6 +36,9 @@ DEFAULT_EXHAUSTIVENESS = 64
 DEFAULT_NUM_MODES = 10
 DEFAULT_SEED = 42
 DEFAULT_TIMEOUT_S = 300
+# Shown in the GUI when ligand-only PDB is missing (user enters grid manually).
+DEFAULT_MANUAL_GRID_CENTER = (0.0, 0.0, 0.0)
+DEFAULT_MANUAL_GRID_SIZE = (20.0, 20.0, 20.0)
 
 # Tan cartoon used elsewhere; post-docking view uses white receptor + emphasized ligand.
 RECEPTOR_CARTOON_HEX = "d2b48c"
@@ -651,6 +654,22 @@ def compute_receptor_grid_params(
     )
 
 
+def dock_grid_display_defaults(
+    receptor_folder: str,
+    project_root: Optional[Path] = None,
+) -> Tuple[Tuple[float, float, float], Tuple[float, float, float], bool, str]:
+    """
+    Values for Streamlit number_input widgets.
+
+    Returns (center, size, has_recommended, help_message).
+    When co-crystal PDBs are missing/LFS, has_recommended is False and manual defaults are used.
+    """
+    center, size, msg = compute_receptor_grid_params(receptor_folder, project_root=project_root)
+    if center is not None and size is not None:
+        return center, size, True, msg
+    return DEFAULT_MANUAL_GRID_CENTER, DEFAULT_MANUAL_GRID_SIZE, False, msg
+
+
 def _select_docking_engine(files_dir: Path) -> Tuple[Optional[str], Optional[Path]]:
     """
     Pose generation is SMINA-only by design.
@@ -864,44 +883,11 @@ def run_single_receptor_docking(
             log_path=None,
             html=None,
         )
-    if lig_path is None or not lig_path.is_file():
-        return DockingResult(
-            ok=False,
-            message="No ligand-only PDB found for selected receptor.",
-            receptor_name=receptor_folder,
-            canonical_smiles=canonical_smiles,
-            center=(0.0, 0.0, 0.0),
-            size=(0.0, 0.0, 0.0),
-            score_kcal_mol=None,
-            engine=engine or "unknown",
-            command="",
-            out_pose_path=None,
-            log_path=None,
-            html=None,
-        )
+    manual_grid = grid_center is not None and grid_size is not None
 
-    lig_coords = _ligand_heavy_coords_from_path(lig_path)
-    if lig_coords is None:
-        _, _, grid_msg = compute_receptor_grid_params(receptor_folder, project_root=project_root)
-        return DockingResult(
-            ok=False,
-            message=grid_msg or "Could not parse ligand-only PDB coordinates to build a docking grid.",
-            receptor_name=receptor_folder,
-            canonical_smiles=canonical_smiles,
-            center=(0.0, 0.0, 0.0),
-            size=(0.0, 0.0, 0.0),
-            score_kcal_mol=None,
-            engine=engine or "unknown",
-            command="",
-            out_pose_path=None,
-            log_path=None,
-            html=None,
-        )
-    center, size = _grid_from_ligand_coords(lig_coords)
-    if grid_center is not None:
-        center = (float(grid_center[0]), float(grid_center[1]), float(grid_center[2]))
-    if grid_size is not None:
-        sx, sy, sz = float(grid_size[0]), float(grid_size[1]), float(grid_size[2])
+    if manual_grid:
+        center = (float(grid_center[0]), float(grid_center[1]), float(grid_center[2]))  # type: ignore[index]
+        sx, sy, sz = float(grid_size[0]), float(grid_size[1]), float(grid_size[2])  # type: ignore[index]
         if sx <= 0.0 or sy <= 0.0 or sz <= 0.0:
             return DockingResult(
                 ok=False,
@@ -909,7 +895,7 @@ def run_single_receptor_docking(
                 receptor_name=receptor_folder,
                 canonical_smiles=canonical_smiles,
                 center=center,
-                size=size,
+                size=(sx, sy, sz),
                 score_kcal_mol=None,
                 engine=engine or "unknown",
                 command="",
@@ -918,6 +904,49 @@ def run_single_receptor_docking(
                 html=None,
             )
         size = (sx, sy, sz)
+    else:
+        if lig_path is None or not lig_path.is_file():
+            return DockingResult(
+                ok=False,
+                message=(
+                    "No ligand-only PDB for automatic grid. Open **Docking search box** and enter "
+                    "center/size manually, then run docking again."
+                ),
+                receptor_name=receptor_folder,
+                canonical_smiles=canonical_smiles,
+                center=(0.0, 0.0, 0.0),
+                size=(0.0, 0.0, 0.0),
+                score_kcal_mol=None,
+                engine=engine or "unknown",
+                command="",
+                out_pose_path=None,
+                log_path=None,
+                html=None,
+            )
+
+        lig_coords = _ligand_heavy_coords_from_path(lig_path)
+        if lig_coords is None:
+            _, _, grid_msg = compute_receptor_grid_params(
+                receptor_folder, project_root=project_root
+            )
+            return DockingResult(
+                ok=False,
+                message=(
+                    (grid_msg or "Could not parse ligand-only PDB for automatic grid.")
+                    + " Enter grid center/size in the docking panel and run again."
+                ),
+                receptor_name=receptor_folder,
+                canonical_smiles=canonical_smiles,
+                center=(0.0, 0.0, 0.0),
+                size=(0.0, 0.0, 0.0),
+                score_kcal_mol=None,
+                engine=engine or "unknown",
+                command="",
+                out_pose_path=None,
+                log_path=None,
+                html=None,
+            )
+        center, size = _grid_from_ligand_coords(lig_coords)
 
     runs_dir = project_root / "docking_results"
     run_dir = runs_dir / f"{receptor_folder}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
