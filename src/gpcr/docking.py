@@ -347,8 +347,19 @@ def ensure_docking_files_folder(project_root: Optional[Path] = None) -> Tuple[Pa
     return dst, f"docking_assets synced from MBind source ({copied} updated file(s))."
 
 
+def _josh_receptor_features_root(project_root: Path) -> Path:
+    """Josh_Receptor_Features under GPCR_DATA_ROOT (Cloud zip) or project root."""
+    env = os.environ.get("GPCR_DATA_ROOT", "").strip()
+    if env:
+        candidate = Path(env) / "Josh_Receptor_Features"
+        if candidate.is_dir():
+            return candidate
+    local = project_root / "Josh_Receptor_Features"
+    return local
+
+
 def _write_receptor_grid_manifest(project_root: Path, docking_files_dir: Path) -> None:
-    receptor_root = project_root / "Josh_Receptor_Features"
+    receptor_root = _josh_receptor_features_root(project_root)
     if not receptor_root.is_dir():
         return
     manifest = {}
@@ -449,26 +460,115 @@ def _pdb_line_element_symbol(line: str) -> str:
     return name[0]
 
 
+def _is_git_lfs_pointer(text: str) -> bool:
+    head = text[:400].lower()
+    return "git-lfs.github.com" in head or head.startswith("version https://git-lfs")
+
+
+def _coords_from_pdb_line_split(line: str) -> Optional[Tuple[float, float, float]]:
+    """Fallback when fixed-width columns are misaligned (some exports)."""
+    parts = line.split()
+    if not parts or parts[0] not in ("ATOM", "HETATM"):
+        return None
+    if len(parts) < 9:
+        return None
+    try:
+        x = float(parts[6])
+        y = float(parts[7])
+        z = float(parts[8])
+    except (ValueError, IndexError):
+        return None
+    return x, y, z
+
+
+def _ligand_heavy_coords_rdkit(pdb_text: str) -> Optional[np.ndarray]:
+    try:
+        mol = Chem.MolFromPDBBlock(pdb_text, sanitize=False, removeHs=True)
+    except Exception:
+        mol = None
+    if mol is None or mol.GetNumConformers() == 0:
+        return None
+    conf = mol.GetConformer()
+    pts = []
+    for i in range(mol.GetNumAtoms()):
+        pos = conf.GetAtomPosition(i)
+        pts.append([float(pos.x), float(pos.y), float(pos.z)])
+    if not pts:
+        return None
+    return np.asarray(pts, dtype=np.float64)
+
+
 def _ligand_heavy_coords_from_pdb(pdb_text: str) -> Optional[np.ndarray]:
-    coords = []
+    if not pdb_text or not pdb_text.strip():
+        return None
+    if _is_git_lfs_pointer(pdb_text):
+        return None
+
+    coords: List[List[float]] = []
     for line in pdb_text.splitlines():
         if not (line.startswith("ATOM") or line.startswith("HETATM")):
             continue
-        if len(line) < 54:
-            continue
-        elem = _pdb_line_element_symbol(line)
+        elem = _pdb_line_element_symbol(line) if len(line) >= 12 else ""
         if elem in ("H", "D"):
             continue
-        try:
-            x = float(line[30:38])
-            y = float(line[38:46])
-            z = float(line[46:54])
-        except ValueError:
+        xyz: Optional[Tuple[float, float, float]] = None
+        if len(line) >= 54:
+            try:
+                xyz = (
+                    float(line[30:38]),
+                    float(line[38:46]),
+                    float(line[46:54]),
+                )
+            except ValueError:
+                xyz = None
+        if xyz is None:
+            xyz = _coords_from_pdb_line_split(line)
+        if xyz is None:
             continue
-        coords.append([x, y, z])
-    if not coords:
+        coords.append(list(xyz))
+
+    if coords:
+        return np.asarray(coords, dtype=np.float64)
+    return _ligand_heavy_coords_rdkit(pdb_text)
+
+
+def _ligand_heavy_coords_from_path(lig_path: Path) -> Optional[np.ndarray]:
+    if not lig_path.is_file() or lig_path.stat().st_size < 80:
         return None
-    return np.asarray(coords, dtype=np.float64)
+    text = lig_path.read_text(encoding="utf-8", errors="ignore")
+    return _ligand_heavy_coords_from_pdb(text)
+
+
+def _grid_from_manifest_entry(entry: dict) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    center = (
+        float(entry["center_x"]),
+        float(entry["center_y"]),
+        float(entry["center_z"]),
+    )
+    size = (
+        float(entry["size_x"]),
+        float(entry["size_y"]),
+        float(entry["size_z"]),
+    )
+    return center, size
+
+
+def _grid_from_cached_manifest(
+    receptor_folder: str,
+    project_root: Path,
+) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float], str]]:
+    manifest_path = project_root / "docking_assets" / "receptor_grid_boxes.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    entry = data.get(receptor_folder)
+    if not entry:
+        return None
+    center, size = _grid_from_manifest_entry(entry)
+    return center, size, f"ok (cached grid for {receptor_folder})"
 
 
 def _grid_from_ligand_coords(coords: np.ndarray) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
@@ -483,18 +583,72 @@ def _grid_from_ligand_coords(coords: np.ndarray) -> Tuple[Tuple[float, float, fl
     )
 
 
-def compute_receptor_grid_params(receptor_folder: str) -> Tuple[Optional[Tuple[float, float, float]], Optional[Tuple[float, float, float]], str]:
-    rec_path, lig_path = resolve_receptor_structure_paths(receptor_folder)
+def compute_receptor_grid_params(
+    receptor_folder: str,
+    project_root: Optional[Path] = None,
+) -> Tuple[Optional[Tuple[float, float, float]], Optional[Tuple[float, float, float]], str]:
+    from .receptor_names import resolve_receptor_folder
+
+    root = project_root or _resolve_project_root()
+    data_root = Path(os.environ.get("GPCR_DATA_ROOT", "").strip() or root)
+    folder = resolve_receptor_folder(receptor_folder, data_root) or str(receptor_folder).strip()
+
+    ensure_docking_files_folder(root)
+    cached = _grid_from_cached_manifest(folder, root)
+    if cached is not None:
+        return cached
+
+    rec_path, lig_path = resolve_receptor_structure_paths(folder)
     if rec_path is None or not rec_path.is_file():
-        return None, None, "Missing receptor-only PDB for this target."
-    if lig_path is None or not lig_path.is_file():
-        return None, None, "Missing ligand-only PDB for this target."
-    lig_text = lig_path.read_text(encoding="utf-8", errors="ignore")
-    coords = _ligand_heavy_coords_from_pdb(lig_text)
-    if coords is None:
-        return None, None, "Could not parse heavy-atom coordinates from ligand-only PDB."
-    center, size = _grid_from_ligand_coords(coords)
-    return center, size, "ok"
+        return (
+            None,
+            None,
+            f"Missing receptor-only PDB under Josh_Receptor_Features/{folder}/.",
+        )
+
+    pocket = _josh_receptor_features_root(root) / folder
+    ligand_candidates: List[Path] = []
+    if lig_path is not None and lig_path.is_file():
+        ligand_candidates.append(lig_path)
+    if pocket.is_dir():
+        for p in sorted(pocket.glob("*_ligand_only.pdb")):
+            if p not in ligand_candidates:
+                ligand_candidates.append(p)
+
+    if not ligand_candidates:
+        return None, None, f"Missing ligand-only PDB under Josh_Receptor_Features/{folder}/."
+
+    last_path: Optional[Path] = None
+    for cand in ligand_candidates:
+        last_path = cand
+        coords = _ligand_heavy_coords_from_path(cand)
+        if coords is not None and coords.shape[0] > 0:
+            center, size = _grid_from_ligand_coords(coords)
+            return center, size, f"ok ({cand.name})"
+
+    assert last_path is not None
+    lig_text = last_path.read_text(encoding="utf-8", errors="ignore")
+    nbytes = last_path.stat().st_size
+    if _is_git_lfs_pointer(lig_text):
+        return (
+            None,
+            None,
+            f"`{last_path.name}` is a Git LFS pointer ({nbytes} bytes), not a real PDB. "
+            "Redeploy with full structure files in your data zip or commit real PDBs via LFS.",
+        )
+    if nbytes < 80:
+        return (
+            None,
+            None,
+            f"`{last_path.name}` is empty or too small ({nbytes} bytes). "
+            "Include full `*_ligand_only.pdb` files in **GPCR_DATA_ROOT** (slim zip must retain pocket PDBs).",
+        )
+    return (
+        None,
+        None,
+        f"Could not parse heavy-atom coordinates from `{last_path.name}` ({nbytes} bytes). "
+        "Expected ATOM/HETATM records with x,y,z coordinates.",
+    )
 
 
 def _select_docking_engine(files_dir: Path) -> Tuple[Optional[str], Optional[Path]]:
@@ -726,11 +880,12 @@ def run_single_receptor_docking(
             html=None,
         )
 
-    lig_coords = _ligand_heavy_coords_from_pdb(lig_path.read_text(encoding="utf-8", errors="ignore"))
+    lig_coords = _ligand_heavy_coords_from_path(lig_path)
     if lig_coords is None:
+        _, _, grid_msg = compute_receptor_grid_params(receptor_folder, project_root=project_root)
         return DockingResult(
             ok=False,
-            message="Could not parse ligand-only PDB coordinates to build a docking grid.",
+            message=grid_msg or "Could not parse ligand-only PDB coordinates to build a docking grid.",
             receptor_name=receptor_folder,
             canonical_smiles=canonical_smiles,
             center=(0.0, 0.0, 0.0),

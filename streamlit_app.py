@@ -1631,13 +1631,22 @@ def render_gpcr_prediction_page():
                 "Pose generation uses SMINA with defaults: exhaustiveness=64, num_modes=10, seed=42."
             )
 
-            dock_folder = resolve_receptor_folder(
-                str(last_pred["receptor"]),
-                get_gpcr_data_root(),
-            ) or str(last_pred["receptor"])
-            from src.gpcr.docking import compute_receptor_grid_params, run_single_receptor_docking
+            data_root = get_gpcr_data_root()
+            dock_folder = (
+                resolve_receptor_folder(str(last_pred["receptor"]), data_root)
+                or str(last_pred["receptor"])
+            )
+            from src.gpcr.docking import (
+                compute_receptor_grid_params,
+                ensure_docking_files_folder,
+                run_single_receptor_docking,
+            )
 
-            rec_center, rec_size, grid_help = compute_receptor_grid_params(dock_folder)
+            ensure_docking_files_folder(HANDOFF_DIR)
+            rec_center, rec_size, grid_help = compute_receptor_grid_params(
+                dock_folder,
+                project_root=HANDOFF_DIR,
+            )
 
             with st.expander("Docking search box (recommended vs. custom)", expanded=False):
                 if rec_center is None or rec_size is None:
