@@ -1404,33 +1404,27 @@ def render_gpcr_prediction_page():
         return
 
     predictor = None
-    cloud_subprocess_mode = False
+    cloud_ephemeral_mode = False
     if _is_streamlit_cloud():
-        _pred_key = (evaluation_regime or "", model_type or "", int(seed))
-        if not st.session_state.get("_cloud_predict_enabled"):
-            st.warning(
-                "Streamlit Cloud has **~1 GB RAM**. The RF model is **not** loaded into this "
-                "process. Each **Predict** runs in a **separate subprocess** so memory is released afterward."
+        cloud_path = (
+            HANDOFF_DIR
+            / "artifacts"
+            / "manuscript"
+            / (evaluation_regime or "independent_ligand")
+            / "rf"
+            / f"model_seed{seed}_cloud.pkl"
+        )
+        if not cloud_path.is_file() or cloud_path.stat().st_size < 50_000:
+            st.error(
+                f"**Missing `model_seed{seed}_cloud.pkl`** (small RF for Cloud). "
+                "On your PC run `py -3 scripts/shrink_rf_for_cloud.py`, then commit and "
+                "`git lfs push` the file under `artifacts/manuscript/.../rf/`. "
+                "The full `model_seed42.pkl` (1000 trees) cannot run on Streamlit Cloud."
             )
-            if not _cloud_rf_artifact_ready(evaluation_regime, seed):
-                st.error(
-                    f"Missing RF weights under `artifacts/manuscript/{evaluation_regime}/rf/`. "
-                    "Need `model_seed42.pkl` or `model_seed42_cloud.pkl` (run `scripts/shrink_rf_for_cloud.py`)."
-                )
-                return
-            if st.button("Enable predictions", type="primary", key="load_predictor_btn"):
-                st.session_state["_cloud_predict_enabled"] = True
-                st.session_state["_predictor_key"] = _pred_key
-                st.session_state.pop("_active_predictor", None)
-                _gc.collect()
-                st.rerun()
-            st.caption("The prediction form appears after you enable predictions.")
             return
-        cloud_subprocess_mode = True
-        st.info(
-            "**Cloud mode:** Predict runs in a subprocess (~30–90 s). "
-            "If the page shows *Connecting…* and reloads, the worker ran out of memory — "
-            "deploy `model_seed42_cloud.pkl` from `scripts/shrink_rf_for_cloud.py`."
+        cloud_ephemeral_mode = True
+        st.caption(
+            f"**Cloud:** uses `model_seed{seed}_cloud.pkl` only. RF loads on each Predict, then is freed."
         )
     else:
         try:
