@@ -132,6 +132,12 @@ def _ensure_default_gpcr_data_root() -> None:
         _apply_gpcr_data_root(Path(existing))
         return
     gui = PROJECT_ROOT.parent / "GUI_Folder"
+    if _is_valid_gpcr_data_root(gui):
+        _apply_gpcr_data_root(gui)
+        return
+    if _is_valid_gpcr_data_root(PROJECT_ROOT):
+        _apply_gpcr_data_root(PROJECT_ROOT)
+        return
     if _is_manuscript_ready_gpcr_root(gui):
         _apply_gpcr_data_root(gui)
         return
@@ -705,6 +711,7 @@ from src.gpcr.receptor_names import receptor_display_options, resolve_receptor_f
 from src.gpcr.manuscript_bundle import manuscript_bundle_available, scan_manuscript_artifacts
 from src.gpcr.manuscript_features import manuscript_debug_status
 from src.gpcr.structure_view import py3dmol_available
+from src.gpcr.docking import compute_receptor_grid_params, run_single_receptor_docking
 
 try:
     import streamlit.components.v1 as st_components
@@ -1615,12 +1622,7 @@ def render_gpcr_prediction_page():
                 st.plotly_chart(fig, use_container_width=True)
 
         def _render_docking_section(last_pred: dict) -> None:
-            try:
-                _render_docking_section_impl(last_pred)
-            except Exception as exc:
-                st.error(f"Could not load docking panel: {exc}")
-
-        def _render_docking_section_impl(last_pred: dict) -> None:
+            """Docking + SMINA + py3Dmol (same flow as legacy working app)."""
             st.divider()
             st.subheader("Docking + receptor-ligand visualization")
             st.caption(
@@ -1630,151 +1632,104 @@ def render_gpcr_prediction_page():
             )
 
             dock_folder = str(last_pred["receptor"])
-            data_root = get_gpcr_data_root()
-            dock_folder_resolved = (
-                resolve_receptor_folder(dock_folder, data_root) or dock_folder
-            )
-            from src.gpcr.docking import (
-                dock_grid_display_defaults,
-                ensure_docking_files_folder,
-                run_single_receptor_docking,
-            )
+            rec_center, rec_size, grid_help = compute_receptor_grid_params(dock_folder)
 
-            ensure_docking_files_folder(HANDOFF_DIR)
-            rec_center, rec_size, has_recommended, grid_help = dock_grid_display_defaults(
-                dock_folder_resolved,
-                project_root=HANDOFF_DIR,
-            )
-            if has_recommended:
-                st.session_state.setdefault(f"_dock_rec_cx_{dock_folder}", float(rec_center[0]))
-                st.session_state.setdefault(f"_dock_rec_cy_{dock_folder}", float(rec_center[1]))
-                st.session_state.setdefault(f"_dock_rec_cz_{dock_folder}", float(rec_center[2]))
-                st.session_state.setdefault(f"_dock_rec_sx_{dock_folder}", float(rec_size[0]))
-                st.session_state.setdefault(f"_dock_rec_sy_{dock_folder}", float(rec_size[1]))
-                st.session_state.setdefault(f"_dock_rec_sz_{dock_folder}", float(rec_size[2]))
-
-            with st.expander(
-                "Docking search box (recommended vs. custom)",
-                expanded=not has_recommended,
-            ):
-                if not has_recommended:
-                    st.warning(grid_help)
-                    st.caption(
-                        "Co-crystal PDB is unavailable on this host (often Git LFS pointers on Cloud). "
-                        "**Enter grid center and box size below** (e.g. from literature or a local PyMOL session), "
-                        "then run docking. Receptor-only PDB is still required."
-                    )
+            with st.expander("Docking search box (recommended vs. custom)", expanded=False):
+                if rec_center is None or rec_size is None:
+                    st.info(grid_help)
                 else:
                     st.caption(
-                        "Defaults follow the co-crystal ligand geometry. Edited values are passed to SMINA as "
+                        "These defaults follow the co-crystal ligand geometry. Edited values are passed to SMINA as "
                         "`--center_*` and `--size_*`."
                     )
-
-                cx, cy, cz = st.columns(3)
-                with cx:
-                    st.number_input(
-                        "Center X (Å)",
-                        format="%.3f",
-                        step=0.1,
-                        value=float(rec_center[0]),
-                        key=f"dock_cx_{dock_folder}",
-                    )
-                with cy:
-                    st.number_input(
-                        "Center Y (Å)",
-                        format="%.3f",
-                        step=0.1,
-                        value=float(rec_center[1]),
-                        key=f"dock_cy_{dock_folder}",
-                    )
-                with cz:
-                    st.number_input(
-                        "Center Z (Å)",
-                        format="%.3f",
-                        step=0.1,
-                        value=float(rec_center[2]),
-                        key=f"dock_cz_{dock_folder}",
-                    )
-                sx, sy, sz = st.columns(3)
-                with sx:
-                    st.number_input(
-                        "Size X (Å)",
-                        format="%.3f",
-                        step=0.5,
-                        min_value=1.0,
-                        max_value=80.0,
-                        value=float(rec_size[0]),
-                        key=f"dock_sx_{dock_folder}",
-                    )
-                with sy:
-                    st.number_input(
-                        "Size Y (Å)",
-                        format="%.3f",
-                        step=0.5,
-                        min_value=1.0,
-                        max_value=80.0,
-                        value=float(rec_size[1]),
-                        key=f"dock_sy_{dock_folder}",
-                    )
-                with sz:
-                    st.number_input(
-                        "Size Z (Å)",
-                        format="%.3f",
-                        step=0.5,
-                        min_value=1.0,
-                        max_value=80.0,
-                        value=float(rec_size[2]),
-                        key=f"dock_sz_{dock_folder}",
-                    )
-                if has_recommended and st.button(
-                    "Reset box to recommended", key=f"dock_reset_grid_{dock_folder}"
-                ):
-                    st.session_state[f"dock_cx_{dock_folder}"] = float(
-                        st.session_state[f"_dock_rec_cx_{dock_folder}"]
-                    )
-                    st.session_state[f"dock_cy_{dock_folder}"] = float(
-                        st.session_state[f"_dock_rec_cy_{dock_folder}"]
-                    )
-                    st.session_state[f"dock_cz_{dock_folder}"] = float(
-                        st.session_state[f"_dock_rec_cz_{dock_folder}"]
-                    )
-                    st.session_state[f"dock_sx_{dock_folder}"] = float(
-                        st.session_state[f"_dock_rec_sx_{dock_folder}"]
-                    )
-                    st.session_state[f"dock_sy_{dock_folder}"] = float(
-                        st.session_state[f"_dock_rec_sy_{dock_folder}"]
-                    )
-                    st.session_state[f"dock_sz_{dock_folder}"] = float(
-                        st.session_state[f"_dock_rec_sz_{dock_folder}"]
-                    )
-                    st.rerun()
+                    cx, cy, cz = st.columns(3)
+                    with cx:
+                        st.number_input(
+                            "Center X (Å)",
+                            format="%.3f",
+                            step=0.1,
+                            value=float(rec_center[0]),
+                            key=f"dock_cx_{dock_folder}",
+                        )
+                    with cy:
+                        st.number_input(
+                            "Center Y (Å)",
+                            format="%.3f",
+                            step=0.1,
+                            value=float(rec_center[1]),
+                            key=f"dock_cy_{dock_folder}",
+                        )
+                    with cz:
+                        st.number_input(
+                            "Center Z (Å)",
+                            format="%.3f",
+                            step=0.1,
+                            value=float(rec_center[2]),
+                            key=f"dock_cz_{dock_folder}",
+                        )
+                    sx, sy, sz = st.columns(3)
+                    with sx:
+                        st.number_input(
+                            "Size X (Å)",
+                            format="%.3f",
+                            step=0.5,
+                            min_value=1.0,
+                            max_value=80.0,
+                            value=float(rec_size[0]),
+                            key=f"dock_sx_{dock_folder}",
+                        )
+                    with sy:
+                        st.number_input(
+                            "Size Y (Å)",
+                            format="%.3f",
+                            step=0.5,
+                            min_value=1.0,
+                            max_value=80.0,
+                            value=float(rec_size[1]),
+                            key=f"dock_sy_{dock_folder}",
+                        )
+                    with sz:
+                        st.number_input(
+                            "Size Z (Å)",
+                            format="%.3f",
+                            step=0.5,
+                            min_value=1.0,
+                            max_value=80.0,
+                            value=float(rec_size[2]),
+                            key=f"dock_sz_{dock_folder}",
+                        )
+                    if st.button("Reset box to recommended", key=f"dock_reset_grid_{dock_folder}"):
+                        st.session_state[f"dock_cx_{dock_folder}"] = float(rec_center[0])
+                        st.session_state[f"dock_cy_{dock_folder}"] = float(rec_center[1])
+                        st.session_state[f"dock_cz_{dock_folder}"] = float(rec_center[2])
+                        st.session_state[f"dock_sx_{dock_folder}"] = float(rec_size[0])
+                        st.session_state[f"dock_sy_{dock_folder}"] = float(rec_size[1])
+                        st.session_state[f"dock_sz_{dock_folder}"] = float(rec_size[2])
+                        st.rerun()
 
             if st.button("Run docking and show top pose", key="btn_single_docking", type="secondary"):
                 with st.spinner("Running docking..."):
-                    grid_kw = {
-                        "grid_center": (
+                    grid_kw = {}
+                    if rec_center is not None and rec_size is not None:
+                        grid_kw["grid_center"] = (
                             float(st.session_state[f"dock_cx_{dock_folder}"]),
                             float(st.session_state[f"dock_cy_{dock_folder}"]),
                             float(st.session_state[f"dock_cz_{dock_folder}"]),
-                        ),
-                        "grid_size": (
+                        )
+                        grid_kw["grid_size"] = (
                             float(st.session_state[f"dock_sx_{dock_folder}"]),
                             float(st.session_state[f"dock_sy_{dock_folder}"]),
                             float(st.session_state[f"dock_sz_{dock_folder}"]),
-                        ),
-                    }
+                        )
                     dock_res = run_single_receptor_docking(
-                        receptor_folder=dock_folder_resolved,
+                        receptor_folder=dock_folder,
                         canonical_smiles=str(last_pred["canonical_smiles"]),
                         **grid_kw,
                     )
                 st.session_state["last_docking_result"] = dock_res.__dict__
 
             dock_result = st.session_state.get("last_docking_result")
-            if dock_result and dock_result.get("receptor_name") in (
-                dock_folder,
-                dock_folder_resolved,
-            ):
+            if dock_result and dock_result.get("receptor_name") == str(last_pred["receptor"]):
                 if dock_result.get("ok"):
                     if not py3dmol_available():
                         st.info("Install **py3Dmol** to render the docked complex: `pip install py3Dmol`")
@@ -1788,19 +1743,20 @@ def render_gpcr_prediction_page():
                         )
                         st_components.html(str(dock_result["html"]), height=560, scrolling=False)
                         st.caption(
-                            "**3D viewer:** drag to rotate • **Ctrl+drag** or **middle mouse** to pan • scroll to zoom."
+                            "**3D viewer:** drag to rotate the scene • **Ctrl+drag** or **middle mouse** drag to pan "
+                            "(move left/right and up/down) • scroll to zoom."
                         )
                         score = dock_result.get("score_kcal_mol")
                         st.markdown(
                             f"**Top Pose Docking Score (kcal/mol):** "
                             f"{float(score):.3f}" if score is not None else "**Top Pose Docking Score (kcal/mol):** N/A"
                         )
-                        grid_center = dock_result.get("center")
-                        grid_size = dock_result.get("size")
-                        if grid_center and grid_size and len(grid_center) == 3 and len(grid_size) == 3:
+                        gc = dock_result.get("center")
+                        gs = dock_result.get("size")
+                        if gc and gs and len(gc) == 3 and len(gs) == 3:
                             st.caption(
-                                f"**Search box used:** center ({float(grid_center[0]):.3f}, {float(grid_center[1]):.3f}, {float(grid_center[2]):.3f}) Å · "
-                                f"size ({float(grid_size[0]):.3f}, {float(grid_size[1]):.3f}, {float(grid_size[2]):.3f}) Å"
+                                f"**Search box used:** center ({float(gc[0]):.3f}, {float(gc[1]):.3f}, {float(gc[2]):.3f}) Å · "
+                                f"size ({float(gs[0]):.3f}, {float(gs[1]):.3f}, {float(gs[2]):.3f}) Å"
                             )
                         contacts = dock_result.get("contact_summary")
                         if contacts:
