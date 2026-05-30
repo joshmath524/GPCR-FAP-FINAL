@@ -36,6 +36,9 @@ DEFAULT_EXHAUSTIVENESS = 64
 DEFAULT_NUM_MODES = 10
 DEFAULT_SEED = 42
 DEFAULT_TIMEOUT_S = 300
+CONDA_SMina_LINUX_URL = (
+    "https://conda.anaconda.org/conda-forge/linux-64/smina-2020.12.10-hecca717_2.conda"
+)
 # Shown in the GUI when ligand-only PDB is missing (user enters grid manually).
 DEFAULT_MANUAL_GRID_CENTER = (0.0, 0.0, 0.0)
 DEFAULT_MANUAL_GRID_SIZE = (20.0, 20.0, 20.0)
@@ -432,29 +435,84 @@ def _ensure_local_binaries_executable(files_dir: Path) -> None:
             _try_make_executable(p)
 
 
+def _writable_docking_cache_dir() -> Path:
+    """Writable location for SMINA on read-only deployments (e.g. Streamlit Cloud)."""
+    env = os.environ.get("GPCR_DOCKING_CACHE", "").strip()
+    cache = Path(env) if env else Path("/tmp/gpcr_fap_docking")
+    cache.mkdir(parents=True, exist_ok=True)
+    return cache
+
+
+def _stage_binary_for_execution(src: Path, cache_name: str = "smina") -> Optional[Path]:
+    """
+    Return an executable path for *src*.
+
+    On read-only mounts the repo copy may lack +x; copy into a writable cache and chmod there.
+    """
+    if not src.is_file():
+        return None
+    if _is_executable_on_platform(src) or _try_make_executable(src):
+        return src
+    cache = _writable_docking_cache_dir() / cache_name
+    try:
+        if (not cache.is_file()) or cache.stat().st_size != src.stat().st_size:
+            shutil.copy2(src, cache)
+        if _is_executable_on_platform(cache) or _try_make_executable(cache):
+            return cache
+    except OSError:
+        return None
+    return None
+
+
+def _extract_smina_from_conda_package(data: bytes, target_path: Path) -> bool:
+    """Pull ``bin/smina`` out of a conda-forge linux-64 ``.conda`` archive."""
+    import io
+    import tarfile
+    import zipfile
+
+    try:
+        import zstandard as zstd
+    except ImportError:
+        return False
+    try:
+        outer = zipfile.ZipFile(io.BytesIO(data))
+        pkg_name = next(n for n in outer.namelist() if n.startswith("pkg-") and n.endswith(".tar.zst"))
+        raw = outer.read(pkg_name)
+        tar_bytes = zstd.ZstdDecompressor().decompress(raw)
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tf:
+            member = next(m for m in tf.getmembers() if m.name.endswith("bin/smina"))
+            blob = tf.extractfile(member)
+            if blob is None:
+                return False
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(blob.read())
+            return _try_make_executable(target_path)
+    except Exception:
+        return False
+
+
 def _download_smina_linux(target_path: Path) -> Tuple[bool, str]:
     """
     Download a Linux SMINA binary when not bundled.
-    Uses public SourceForge endpoint for the static build.
+
+    Uses conda-forge (reliable direct URL). SourceForge static builds require a browser
+    redirect and are not suitable for headless auto-download.
     """
     if os.name == "nt":
         return False, "Auto-download is only enabled for Linux deployments."
-    urls = [
-        "https://sourceforge.net/projects/smina/files/smina.static/download",
-    ]
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    for url in urls:
-        try:
-            with urllib.request.urlopen(url, timeout=60) as resp:
-                data = resp.read()
-            if not data or len(data) < 1024:
-                continue
-            target_path.write_bytes(data)
-            if _try_make_executable(target_path):
-                return True, f"Downloaded SMINA to {target_path}."
-        except Exception:
-            continue
-    return False, "Could not auto-download SMINA binary from public mirror."
+    try:
+        req = urllib.request.Request(
+            CONDA_SMina_LINUX_URL,
+            headers={"User-Agent": "GPCR-FAP/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = resp.read()
+        if data and _extract_smina_from_conda_package(data, target_path):
+            return True, f"Downloaded SMINA to {target_path}."
+    except Exception:
+        pass
+    return False, "Could not auto-download SMINA binary from conda-forge."
 
 
 def _pdb_line_element_symbol(line: str) -> str:
@@ -734,28 +792,35 @@ def dock_grid_display_defaults(
 def _select_docking_engine(files_dir: Path) -> Tuple[Optional[str], Optional[Path]]:
     """
     Pose generation is SMINA-only by design.
-    Prefer local docking_assets binary, then PATH.
+    Prefer local docking_assets binary, then PATH, then conda-forge download to cache.
     """
     is_windows = os.name == "nt"
     local_name = "smina.exe" if is_windows else "smina"
-    p = files_dir / local_name
-    if p.is_file() and (_is_executable_on_platform(p) or _try_make_executable(p)):
-        return "smina", p
+    candidates: List[Path] = [files_dir / local_name]
+    if not is_windows:
+        candidates.append(_writable_docking_cache_dir() / "smina")
+
+    for p in candidates:
+        staged = _stage_binary_for_execution(p, cache_name="smina")
+        if staged is not None:
+            return "smina", staged
 
     found = shutil.which("smina")
     if found:
-        return "smina", Path(found)
+        staged = _stage_binary_for_execution(Path(found), cache_name="smina")
+        if staged is not None:
+            return "smina", staged
     if is_windows:
         found_exe = shutil.which("smina.exe")
         if found_exe:
             return "smina", Path(found_exe)
 
-    # Last resort on Linux deployments: auto-provision SMINA in docking_assets.
     if not is_windows:
-        ok, _ = _download_smina_linux(files_dir / "smina")
-        p2 = files_dir / "smina"
-        if ok and p2.is_file() and (_is_executable_on_platform(p2) or _try_make_executable(p2)):
-            return "smina", p2
+        cache_bin = _writable_docking_cache_dir() / "smina"
+        ok, _ = _download_smina_linux(cache_bin)
+        staged = _stage_binary_for_execution(cache_bin, cache_name="smina")
+        if ok and staged is not None:
+            return "smina", staged
     return None, None
 
 
