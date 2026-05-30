@@ -70,9 +70,16 @@ def _bundled_ligand_lookup_path() -> Path:
     return HANDOFF_DIR / "artifacts" / "manuscript" / "ligand_feature_lookup.joblib"
 
 
+def _bundled_ligand_lookup_sqlite_path() -> Path:
+    return HANDOFF_DIR / "artifacts" / "manuscript" / "ligand_feature_lookup.sqlite"
+
+
 def _has_bundled_ligand_lookup() -> bool:
     p = _bundled_ligand_lookup_path()
-    return p.is_file() and p.stat().st_size > 1_000_000
+    if p.is_file() and p.stat().st_size > 1_000_000:
+        return True
+    s = _bundled_ligand_lookup_sqlite_path()
+    return s.is_file() and s.stat().st_size > 100_000
 
 
 # With ligand_feature_lookup.joblib in git LFS, Cloud only needs pockets + ML_code (~137 MB zip).
@@ -678,6 +685,10 @@ def _is_streamlit_cloud() -> bool:
 _CLOUD = _is_streamlit_cloud()
 if _CLOUD:
     os.environ.setdefault("GPCR_JOBLIB_MMAP", "1")
+    # Per-SMILES SQLite lookup avoids loading the full joblib dict into RAM.
+    _sq = _bundled_ligand_lookup_sqlite_path()
+    if not (_sq.is_file() and _sq.stat().st_size > 100_000):
+        os.environ.setdefault("GPCR_SKIP_LIGAND_LOOKUP", "1")
 
 from src.gpcr.predict import (
     predict_single,
@@ -1185,8 +1196,9 @@ def render_gpcr_prediction_page():
     if _is_streamlit_cloud() and not st.session_state.get("_gpcr_predict_unlocked"):
         st.title("GPCR Ligand Functional Activity Prediction")
         st.info(
-            "This page loads **large models** (~170 MB) and a **ligand lookup** (~346 MB on first predict). "
-            "Streamlit Cloud has **~1 GB RAM** — the app opens in steps so the tab does not crash immediately."
+            "This page loads the **Random Forest** model (~170 MB on disk). Streamlit Cloud has **~1 GB RAM**, "
+            "so the app opens in steps. Ligand descriptors use **Mordred + pocket features** on Cloud "
+            "(the full training lookup is skipped to avoid crashes)."
         )
         if st.button("Continue to prediction setup", type="primary", key="gpcr_unlock_tab"):
             st.session_state["_gpcr_predict_unlocked"] = True
@@ -1412,10 +1424,18 @@ def render_gpcr_prediction_page():
             st.write(f"GPCR data root: `{dbg['gpcr_data_root']}`")
             st.write(f"ligand lookup entries: `{dbg['ligand_lookup_entries']}`")
     elif _mode == "manuscript" and _is_streamlit_cloud():
-        st.caption(
-            "First **Predict** loads the ligand lookup (~346 MB on disk). If the app dies when you predict, "
-            "RAM limit was exceeded — not a bug in the tab itself."
-        )
+        _sqlite = _bundled_ligand_lookup_sqlite_path()
+        if _sqlite.is_file() and _sqlite.stat().st_size > 100_000:
+            st.caption(
+                "**Cloud:** ligand lookup via **SQLite** (full training descriptors, low RAM). "
+                "Use **Random Forest** → **Load Random Forest** → **Predict**."
+            )
+        else:
+            st.warning(
+                "**ligand_feature_lookup.sqlite** not deployed — run "
+                "`py -3 scripts/build_ligand_lookup_sqlite.py`, commit via Git LFS, and redeploy. "
+                "Until then, Cloud uses Mordred-only ligand features (less accurate)."
+            )
 
     st.divider()
 

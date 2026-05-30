@@ -110,6 +110,16 @@ Set **`GPCR_DATA_ROOT`** to **Delete-Copy** (must contain per-receptor folders +
 
 Optional: build a global lookup (slow) with `py -3 scripts/build_manuscript_ligand_lookup.py`.
 
+**Streamlit Cloud (~1 GB RAM):** do not `joblib.load` the full lookup. After building joblib, create SQLite:
+
+```powershell
+py -3 scripts/build_ligand_lookup_sqlite.py
+git add artifacts/manuscript/ligand_feature_lookup.sqlite artifacts/manuscript/ligand_feature_lookup_meta.json
+git lfs push
+```
+
+Commit `ligand_feature_lookup.sqlite` via **Git LFS** (~380 MB on disk; only **one SMILES row** is loaded into RAM per Predict).
+
 Verify locally:
 
 ```powershell

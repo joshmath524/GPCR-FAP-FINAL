@@ -17,10 +17,20 @@ import numpy as np
 from rdkit import Chem
 
 from .ligand_enrichment import build_ligand_descriptor_dict
+from .ligand_lookup_store import (
+    count_entries as sqlite_lookup_count,
+    fetch_ligand_features,
+    should_use_sqlite_lookup,
+    sqlite_lookup_available,
+    sqlite_lookup_path,
+)
 from .predict import _canonicalize_smiles
 from .receptor_names import resolve_receptor_folder
 
 _LIGAND_LOOKUP_CACHE: Optional[Tuple[Dict[str, Dict[str, float]], str]] = None
+
+# Streamlit Cloud (~1 GB RAM): do not joblib.load the full lookup except at predict time.
+_LIGAND_LOOKUP_META_CACHE: Optional[Dict[str, object]] = None
 
 
 def _manuscript_root(project_root: Path) -> Path:
@@ -58,10 +68,101 @@ def _try_import_shared_utilities():
         return None
 
 
+def ligand_lookup_meta(project_root: Path) -> Dict[str, object]:
+    """Lightweight lookup stats (no joblib load). Used for Streamlit diagnostics on Cloud."""
+    global _LIGAND_LOOKUP_META_CACHE
+    if _LIGAND_LOOKUP_META_CACHE is not None:
+        return _LIGAND_LOOKUP_META_CACHE
+
+    root = _manuscript_root(project_root)
+    meta_path = root / "ligand_feature_lookup_meta.json"
+    joblib_path = root / "ligand_feature_lookup.joblib"
+    sqlite_path = sqlite_lookup_path(root)
+    if meta_path.exists():
+        try:
+            with open(meta_path, encoding="utf-8") as f:
+                _LIGAND_LOOKUP_META_CACHE = dict(json.load(f))
+                if sqlite_path.is_file():
+                    _LIGAND_LOOKUP_META_CACHE.setdefault(
+                        "sqlite_bytes", sqlite_path.stat().st_size
+                    )
+                return _LIGAND_LOOKUP_META_CACHE
+        except Exception:
+            pass
+
+    if sqlite_lookup_available(root):
+        n = sqlite_lookup_count(root)
+        _LIGAND_LOOKUP_META_CACHE = {
+            "n_smiles": n,
+            "source": "sqlite",
+            "storage": "sqlite",
+            "sqlite_bytes": sqlite_path.stat().st_size,
+        }
+    elif joblib_path.is_file() and joblib_path.stat().st_size > 1_000_000:
+        _LIGAND_LOOKUP_META_CACHE = {
+            "n_smiles": None,
+            "source": "_NEW.xlsx (meta missing — run build_manuscript_ligand_lookup.py)",
+            "joblib_bytes": joblib_path.stat().st_size,
+        }
+    else:
+        _LIGAND_LOOKUP_META_CACHE = {"n_smiles": 0, "source": "missing"}
+    return _LIGAND_LOOKUP_META_CACHE
+
+
+def ligand_lookup_entry_count(project_root: Path) -> int:
+    root = _manuscript_root(project_root)
+    if sqlite_lookup_available(root):
+        n = sqlite_lookup_count(root)
+        return int(n) if n is not None else 0
+    if _skip_ligand_lookup_for_root(project_root):
+        return 0
+    meta = ligand_lookup_meta(project_root)
+    n = meta.get("n_smiles")
+    if isinstance(n, int) and n > 0:
+        return n
+    joblib_path = root / "ligand_feature_lookup.joblib"
+    if joblib_path.is_file() and joblib_path.stat().st_size > 1_000_000:
+        return -1  # present but count unknown without loading
+    return 0
+
+
+def _skip_ligand_lookup_for_root(project_root: Path) -> bool:
+    if should_use_sqlite_lookup(_manuscript_root(project_root)):
+        return False
+    return os.environ.get("GPCR_SKIP_LIGAND_LOOKUP", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _lookup_row_for_smiles(
+    project_root: Path, canon: str
+) -> Tuple[Dict[str, float], str]:
+    root = _manuscript_root(project_root)
+    if should_use_sqlite_lookup(root):
+        row = fetch_ligand_features(root, canon)
+        if row:
+            return row, "sqlite"
+        if _skip_ligand_lookup_for_root(project_root):
+            return {}, "sqlite_miss"
+    if _skip_ligand_lookup_for_root(project_root):
+        return {}, "skipped_for_ram"
+    lookup, src = _load_ligand_lookup(project_root)
+    row = dict(lookup.get(canon, {}))
+    if row:
+        return row, src if src not in ("missing", "corrupt_or_incomplete") else "lookup"
+    return {}, src
+
+
 def _load_ligand_lookup(project_root: Path) -> Tuple[Dict[str, Dict[str, float]], str]:
-    """Load SMILES → ligand descriptor dict built from *_NEW.xlsx only."""
+    """Load SMILES → ligand descriptor dict (heavy — only for inference, not page load)."""
     global _LIGAND_LOOKUP_CACHE
     if _LIGAND_LOOKUP_CACHE is not None:
+        return _LIGAND_LOOKUP_CACHE
+
+    if _skip_ligand_lookup_for_root(project_root):
+        _LIGAND_LOOKUP_CACHE = ({}, "skipped_for_ram")
         return _LIGAND_LOOKUP_CACHE
 
     path = _manuscript_root(project_root) / "ligand_feature_lookup.joblib"
@@ -86,8 +187,8 @@ def _ligand_row_for_smiles(
 ) -> Dict[str, float]:
     from .new_workbook_ligand import ligand_dict_from_new_workbooks
 
-    lookup, _ = _load_ligand_lookup(project_root)
-    row: Dict[str, float] = dict(lookup.get(canon, {}))
+    lookup_row, _ = _lookup_row_for_smiles(project_root, canon)
+    row: Dict[str, float] = dict(lookup_row)
     wb = ligand_dict_from_new_workbooks(receptor_input, canon)
     if wb:
         row.update(wb)
@@ -193,8 +294,7 @@ def manuscript_data_health(project_root: Path) -> Dict[str, object]:
     """
     gpcr_root = _gpcr_data_root_path()
     ml_root = Path(os.environ.get("MANUSCRIPT_ML_ROOT", "").strip() or (gpcr_root / "ML_code"))
-    lookup_path = _manuscript_root(project_root) / "ligand_feature_lookup.joblib"
-    lookup, _ = _load_ligand_lookup(project_root)
+    lookup_entries = ligand_lookup_entry_count(project_root)
 
     receptors_with_workbooks: List[str] = []
     if gpcr_root.is_dir():
@@ -212,16 +312,15 @@ def manuscript_data_health(project_root: Path) -> Dict[str, object]:
     ml_ok = ml_root.is_dir()
     beta2_wb = (gpcr_root / "beta2" / "beta2_agonist_enriched_NEW.xlsx").is_file()
     manuscript_ready = josh and ml_ok
-    prediction_ready = manuscript_ready and (
-        bool(receptors_with_workbooks) or len(lookup) > 0
-    )
+    has_lookup = lookup_entries != 0
+    prediction_ready = manuscript_ready and (bool(receptors_with_workbooks) or has_lookup)
 
     issues: List[str] = []
     if not josh:
         issues.append("Missing Josh_Receptor_Features under GPCR_DATA_ROOT")
     if not ml_ok:
         issues.append("Missing ML_code (set MANUSCRIPT_ML_ROOT or include ML_code in zip)")
-    if manuscript_ready and not receptors_with_workbooks and not lookup:
+    if manuscript_ready and not receptors_with_workbooks and not has_lookup:
         issues.append(
             "No per-receptor *_NEW.xlsx workbooks and no ligand_feature_lookup.joblib — "
             "ligands use Mordred-only fallback (~half the descriptor signal vs local full data)"
@@ -234,7 +333,7 @@ def manuscript_data_health(project_root: Path) -> Dict[str, object]:
         "receptors_with_workbooks": receptors_with_workbooks,
         "receptor_workbook_count": len(receptors_with_workbooks),
         "beta2_agonist_workbook": beta2_wb,
-        "ligand_lookup_entries": len(lookup),
+        "ligand_lookup_entries": lookup_entries if lookup_entries >= 0 else None,
         "issues": issues,
     }
 
@@ -257,11 +356,17 @@ def inference_feature_summary(
     wb = ligand_dict_from_new_workbooks(receptor_input, canon)
     nz = int(np.count_nonzero(np.abs(vec) > 1e-12))
     n_cols = len(cols)
-    lookup_row = _load_ligand_lookup(project_root)[0].get(canon, {})
-    if len(wb) >= 500:
+    lookup_row, lookup_src = _lookup_row_for_smiles(project_root, canon)
+    if lookup_src == "skipped_for_ram":
+        source = "mordred_cloud"
+    elif len(wb) >= 500:
         source = "workbook"
     elif len(wb) > 0:
         source = "workbook_partial"
+    elif lookup_src == "sqlite" and len(lookup_row) >= 500:
+        source = "lookup_sqlite"
+    elif lookup_src == "sqlite" and len(lookup_row) > 0:
+        source = "lookup_sqlite_partial"
     elif len(lookup_row) >= 500:
         source = "lookup"
     elif len(lookup_row) > 0:
@@ -288,11 +393,14 @@ def manuscript_debug_status(project_root: Path) -> Dict[str, object]:
     root = _manuscript_root(project_root)
     manifest_path = root / "manifest.json"
     lookup_path = root / "ligand_feature_lookup.joblib"
+    sqlite_path = sqlite_lookup_path(root)
     gpcr_root = Path(os.environ.get("GPCR_DATA_ROOT", "").strip() or project_root)
     ml_root = os.environ.get("MANUSCRIPT_ML_ROOT", "").strip()
     su = _try_import_shared_utilities()
 
-    lookup, lookup_source = _load_ligand_lookup(project_root)
+    meta = ligand_lookup_meta(project_root)
+    lookup_source = str(meta.get("source", "missing"))
+    lookup_entries = ligand_lookup_entry_count(project_root)
     feature_columns_count = 0
     if manifest_path.exists():
         try:
@@ -308,9 +416,12 @@ def manuscript_debug_status(project_root: Path) -> Dict[str, object]:
         "shared_utilities_imported": su is not None,
         "manifest_exists": manifest_path.exists(),
         "manifest_feature_count": feature_columns_count,
-        "ligand_lookup_exists": lookup_path.exists(),
-        "ligand_lookup_entries": len(lookup),
+        "ligand_lookup_exists": lookup_path.exists() or sqlite_path.exists(),
+        "ligand_lookup_sqlite": sqlite_path.exists(),
+        "ligand_lookup_entries": lookup_entries if lookup_entries >= 0 else meta.get("n_smiles"),
         "ligand_lookup_source": lookup_source,
+        "ligand_lookup_joblib_bytes": meta.get("joblib_bytes"),
+        "ligand_lookup_sqlite_bytes": meta.get("sqlite_bytes"),
         "prediction_ready": health["prediction_ready"],
         "receptor_workbook_count": health["receptor_workbook_count"],
         "beta2_agonist_workbook": health["beta2_agonist_workbook"],
