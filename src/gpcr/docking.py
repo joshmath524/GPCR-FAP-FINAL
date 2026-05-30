@@ -362,15 +362,28 @@ def _josh_receptor_features_root(project_root: Path) -> Path:
 
 
 def _write_receptor_grid_manifest(project_root: Path, docking_files_dir: Path) -> None:
+    """Merge precomputed grid boxes; never wipe a shipped manifest when PDBs are LFS/missing."""
+    out = docking_files_dir / "receptor_grid_boxes.json"
+    manifest: Dict[str, object] = {}
+    if out.is_file() and out.stat().st_size > 10:
+        try:
+            loaded = json.loads(out.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                manifest = dict(loaded)
+        except (json.JSONDecodeError, OSError):
+            pass
+
     receptor_root = _josh_receptor_features_root(project_root)
     if not receptor_root.is_dir():
+        if manifest:
+            out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         return
-    manifest = {}
+
     for folder in sorted(p.name for p in receptor_root.iterdir() if p.is_dir()):
         rec, lig = resolve_receptor_structure_paths(folder)
         if rec is None or lig is None or not lig.is_file():
             continue
-        coords = _ligand_heavy_coords_from_pdb(lig.read_text(encoding="utf-8", errors="ignore"))
+        coords = _ligand_heavy_coords_from_path(lig)
         if coords is None:
             continue
         center, size = _grid_from_ligand_coords(coords)
@@ -384,8 +397,8 @@ def _write_receptor_grid_manifest(project_root: Path, docking_files_dir: Path) -
             "size_y": size[1],
             "size_z": size[2],
         }
-    out = docking_files_dir / "receptor_grid_boxes.json"
-    out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if manifest:
+        out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def _is_executable_on_platform(path: Path) -> bool:
