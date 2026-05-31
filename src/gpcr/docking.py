@@ -789,16 +789,32 @@ def dock_grid_display_defaults(
     return DEFAULT_MANUAL_GRID_CENTER, DEFAULT_MANUAL_GRID_SIZE, False, msg
 
 
+def _bundled_smina_library_dir(files_dir: Path) -> Optional[Path]:
+    lib = files_dir / "smina_linux" / "lib"
+    return lib if lib.is_dir() and any(lib.glob("*.so*")) else None
+
+
+def _smina_subprocess_env(files_dir: Path) -> dict:
+    env = os.environ.copy()
+    lib_dir = _bundled_smina_library_dir(files_dir)
+    if lib_dir is not None:
+        prev = env.get("LD_LIBRARY_PATH", "").strip()
+        lib_path = str(lib_dir)
+        env["LD_LIBRARY_PATH"] = f"{lib_path}:{prev}" if prev else lib_path
+    return env
+
+
 def _select_docking_engine(files_dir: Path) -> Tuple[Optional[str], Optional[Path]]:
     """
     Pose generation is SMINA-only by design.
-    Prefer local docking_assets binary, then PATH, then conda-forge download to cache.
+    Prefer bundled ``docking_assets/smina_linux/`` (binary + shared libs for Cloud).
     """
     is_windows = os.name == "nt"
     local_name = "smina.exe" if is_windows else "smina"
-    candidates: List[Path] = [files_dir / local_name]
+    candidates: List[Path] = []
     if not is_windows:
-        candidates.append(_writable_docking_cache_dir() / "smina")
+        candidates.append(files_dir / "smina_linux" / "bin" / "smina")
+    candidates.extend([files_dir / local_name, _writable_docking_cache_dir() / "smina"])
 
     for p in candidates:
         staged = _stage_binary_for_execution(p, cache_name="smina")
@@ -814,13 +830,6 @@ def _select_docking_engine(files_dir: Path) -> Tuple[Optional[str], Optional[Pat
         found_exe = shutil.which("smina.exe")
         if found_exe:
             return "smina", Path(found_exe)
-
-    if not is_windows:
-        cache_bin = _writable_docking_cache_dir() / "smina"
-        ok, _ = _download_smina_linux(cache_bin)
-        staged = _stage_binary_for_execution(cache_bin, cache_name="smina")
-        if ok and staged is not None:
-            return "smina", staged
     return None, None
 
 
@@ -1135,6 +1144,7 @@ def run_single_receptor_docking(
             capture_output=True,
             text=True,
             timeout=DEFAULT_TIMEOUT_S,
+            env=_smina_subprocess_env(files_dir),
         )
     except subprocess.TimeoutExpired:
         return DockingResult(
