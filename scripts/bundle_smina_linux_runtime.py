@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import subprocess
 import sys
@@ -22,15 +23,7 @@ PACKAGES = {
     "openbabel": "https://conda.anaconda.org/conda-forge/linux-64/openbabel-3.1.1-py311h7c3e0e0_5.tar.bz2",
 }
 
-NEEDED = (
-    "libboost_filesystem.so.1.82.0",
-    "libboost_iostreams.so.1.82.0",
-    "libboost_program_options.so.1.82.0",
-    "libboost_serialization.so.1.82.0",
-    "libboost_thread.so.1.82.0",
-    "libboost_timer.so.1.82.0",
-    "libopenbabel.so.7",
-)
+LIB_PREFIXES = ("libboost", "libopenbabel", "libinchi")
 
 
 def _ensure_zstd():
@@ -54,7 +47,7 @@ def _extract_conda(url: str, dest: Path) -> None:
         with tarfile.open(fileobj=io.BytesIO(bz2.decompress(data))) as tf:
             for member in tf.getmembers():
                 if member.name.startswith("lib/"):
-                    tf.extract(member, dest)
+                    tf.extract(member, dest, filter="data")
         return
     outer = zipfile.ZipFile(io.BytesIO(data))
     pkg_name = next(n for n in outer.namelist() if n.startswith("pkg-") and n.endswith(".tar.zst"))
@@ -64,7 +57,79 @@ def _extract_conda(url: str, dest: Path) -> None:
         for member in tf.getmembers():
             name = member.name
             if name.startswith("bin/smina") or name.startswith("lib/"):
-                tf.extract(member, dest)
+                tf.extract(member, dest, filter="data")
+
+
+def _elf_needed_libs(path: Path) -> set[str]:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return set()
+    if not data.startswith(b"\x7fELF"):
+        return set()
+    return {m.group(0).decode("ascii") for m in re.finditer(rb"lib[a-zA-Z0-9_+\-.]+\.so(?:\.[0-9]+)*", data)}
+
+
+def _copy_runtime_libs(stage: Path, lib_out: Path) -> None:
+    """Copy all Boost/OpenBabel libs, then close over transitive Boost deps."""
+    lib_out.mkdir(parents=True, exist_ok=True)
+    pool: dict[str, Path] = {}
+    for lib_root in sorted(stage.glob("**/lib")):
+        if not lib_root.is_dir():
+            continue
+        for src in sorted(lib_root.iterdir()):
+            if not src.is_file():
+                continue
+            if not src.name.startswith(LIB_PREFIXES):
+                continue
+            if src.stat().st_size <= 0:
+                continue
+            pool[src.name] = src
+
+    required = set(_elf_needed_libs(stage / "bin" / "smina"))
+    while True:
+        added = False
+        for lib_name in list(required):
+            if not lib_name.startswith(("libboost", "libopenbabel", "libinchi")):
+                continue
+            src = pool.get(lib_name)
+            if src is None:
+                continue
+            for dep in _elf_needed_libs(src):
+                if dep.startswith(("libboost", "libopenbabel", "libinchi")) and dep not in required:
+                    required.add(dep)
+                    added = True
+        if not added:
+            break
+
+    missing = sorted(
+        name
+        for name in required
+        if name.startswith(("libboost", "libopenbabel", "libinchi")) and name not in pool
+    )
+    if missing:
+        print("Missing runtime libraries:", ", ".join(missing), file=sys.stderr)
+        sys.exit(1)
+
+    copied = 0
+    for name in sorted(required):
+        if not name.startswith(("libboost", "libopenbabel", "libinchi")):
+            continue
+        src = pool[name]
+        dst = lib_out / name
+        shutil.copy2(src, dst)
+        copied += 1
+
+    # Ship the full Boost 1.82 stack (small enough) to avoid future missing .so errors.
+    for name, src in sorted(pool.items()):
+        if not name.startswith("libboost"):
+            continue
+        dst = lib_out / name
+        if not dst.exists():
+            shutil.copy2(src, dst)
+            copied += 1
+
+    print(f"  copied {copied} shared library file(s)")
 
 
 def main() -> None:
@@ -76,27 +141,11 @@ def main() -> None:
     for url in PACKAGES.values():
         _extract_conda(url, stage)
 
-    LIB.mkdir(parents=True)
     BIN.parent.mkdir(parents=True)
     shutil.copy2(stage / "bin" / "smina", BIN)
-
-    copied = set()
-    for lib_dir in sorted(stage.glob("**/lib")):
-        if not lib_dir.is_dir():
-            continue
-        for name in NEEDED:
-            src = lib_dir / name
-            if src.is_file() and name not in copied:
-                shutil.copy2(src, LIB / name)
-                copied.add(name)
-
-    missing = [n for n in NEEDED if n not in copied]
-    if missing:
-        print("Missing libraries:", ", ".join(missing), file=sys.stderr)
-        sys.exit(1)
+    _copy_runtime_libs(stage, LIB)
 
     shutil.rmtree(stage)
-    # Legacy single-file path used by older code paths.
     legacy = ROOT / "docking_assets" / "smina"
     shutil.copy2(BIN, legacy)
     print(f"Bundled SMINA runtime under {OUT}")
