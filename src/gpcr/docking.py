@@ -581,8 +581,7 @@ def resolve_docking_receptor_pdb(
     if rec_path is not None and rec_path.is_file() and _is_lfs_pointer_file(rec_path):
         return None, (
             f"`{rec_path.name}` is a Git LFS pointer ({rec_path.stat().st_size} bytes), not a real PDB. "
-            "Redeploy with `docking_assets/receptor_pdbs/` (run "
-            "`py -3 scripts/bundle_receptor_pdbs_for_docking.py`) or real structures in your data zip."
+            "Redeploy with `docking_assets/receptor_pdbs/` or real structures in your data zip."
         )
     return None, f"No receptor-only PDB found for `{folder}`."
 

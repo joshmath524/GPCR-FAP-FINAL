@@ -8,7 +8,7 @@ Streamlit app for **Class A GPCR** receptor–ligand **multiclass** functional a
 ## Features
 
 - Predict from SMILES or structure files (SDF, MOL, PDB, PDBQT, MOL2, CSV) for ~70 bundled receptors.
-- Manuscript models: RF, LightGBM, XGBoost, stacking ensemble (`artifacts/manuscript/`, **6,633** features).
+- Manuscript models: RF, LightGBM, XGBoost (`artifacts/manuscript/`, **6,633** features).
 - Optional SMINA top-pose docking and 3D complex view after prediction.
 
 ## Quick start
@@ -22,47 +22,30 @@ Open http://localhost:8501 → choose **evaluation regime**, **model**, and **se
 
 ## Manuscript models
 
-Exports live under `artifacts/manuscript/` (`manifest.json`, `ligand_feature_lookup.sqlite`, and `model_seed*.pkl` per regime/model).
+Deploy under `artifacts/manuscript/`:
 
-For local training/export, set (Windows example):
+- `manifest.json`
+- `ligand_feature_lookup.sqlite` (Git LFS)
+- `independent_ligand/<model>/model_seed42.pkl` (Cloud RF: `model_seed42_cloud.pkl`)
 
-```bash
-set GPCR_DATA_ROOT=C:\path\to\folder\with\Josh_Receptor_Features
-set MANUSCRIPT_ML_ROOT=C:\path\to\ML_code
-```
-
-Re-export example:
-
-```bash
-py -3 scripts/export_manuscript_models.py --regime independent_ligand --model rf --seeds 42
-```
-
-Details: `docs/MANUSCRIPT_STREAMLIT_SETUP.md`. Streamlit Cloud: `docs/STREAMLIT_CLOUD_DEPLOY.md`.
+Optional: set `GPCR_DATA_ROOT` if `Josh_Receptor_Features/` is outside the repo.
 
 ## Requirements
 
 - Python 3.10+ (3.10–3.12 tested)
-- `requirements.txt` locally; Cloud uses `requirements-cloud.txt`
-- Receptor data: `Josh_Receptor_Features/` in repo root, or set `GPCR_DATA_ROOT`
-- Docking: SMINA in `docking_assets/` (Linux Cloud bundle: `docking_assets/smina_linux/`)
+- `requirements.txt` (used by Streamlit Cloud and local installs)
+- Receptor data: `Josh_Receptor_Features/` in repo root, or `GPCR_DATA_ROOT`
+- Docking on Cloud: `docking_assets/smina_linux/` and `docking_assets/receptor_pdbs/`
 
 ## Project layout
 
 ```
 ├── streamlit_app.py
+├── requirements.txt
 ├── artifacts/manuscript/
 ├── Josh_Receptor_Features/
 ├── docking_assets/
-│   ├── receptor_pdbs/
-│   ├── receptor_grid_boxes.json
-│   └── smina_linux/          # Streamlit Cloud
 └── src/gpcr/
-```
-
-## CLI
-
-```bash
-python -m src.gpcr.cli --receptor beta2 --ligand "CCO" --output out.csv
 ```
 
 ## Citation & contact

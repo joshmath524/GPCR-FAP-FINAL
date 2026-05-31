@@ -1111,7 +1111,7 @@ def render_documentation_page():
             - **Features:** manuscript models use **6,633** inputs; ligand values are best when SMILES is in `ligand_feature_lookup.sqlite`.
             - **Docking:** SMINA + Open Babel ship under `docking_assets/smina_linux/`; reboot after GitHub updates.
             - **Secrets (optional):** `DATA_DRIVE_FILE_ID` for a slim data zip if pocket CSVs are not in the repo.
-            - See `docs/STREAMLIT_CLOUD_DEPLOY.md` in the repository for deploy checklists.
+            - Set Streamlit secrets: `DATA_DRIVE_FILE_ID` or `DATA_ZIP_URL` if pocket CSVs are not in the repo.
             """
         )
     else:
@@ -1120,8 +1120,8 @@ def render_documentation_page():
             ## Local setup
             1. Create a virtual environment and run `pip install -r requirements.txt`.
             2. **Receptor data:** place **Josh_Receptor_Features** next to the project or set **`GPCR_DATA_ROOT`**.
-            3. **Manuscript models:** set `GPCR_DATA_ROOT` and `MANUSCRIPT_ML_ROOT`; export with `scripts/export_manuscript_models.py`.
-            4. **Docking (optional):** add `smina` to `docking_assets/`, or run `py -3 scripts/bundle_smina_linux_runtime.py` for Linux.
+            3. **Manuscript models:** deploy `artifacts/manuscript/` (models, `manifest.json`, `ligand_feature_lookup.sqlite`).
+            4. **Docking (optional):** use `docking_assets/smina_linux/` on Linux or add SMINA under `docking_assets/`.
             5. Launch: `streamlit run streamlit_app.py` → `http://localhost:8501`.
             """
         )
@@ -1155,7 +1155,7 @@ def render_documentation_page():
         - **Cloud RF:** `model_seed42_cloud.pkl` (smaller export)
         - **Ligand lookup:** `artifacts/manuscript/ligand_feature_lookup.sqlite` (Git LFS on deploy)
         - **Manifest:** `artifacts/manuscript/manifest.json` (`n_features`: 6633)
-        - Export: `scripts/export_manuscript_models.py` — see `docs/MANUSCRIPT_STREAMLIT_SETUP.md`
+        - Export manuscript models into this layout from your training workspace, then commit via Git LFS.
         """
     )
 
@@ -1170,22 +1170,8 @@ def render_documentation_page():
 
     st.markdown(
         """
-        ## CLI usage
-        ```bash
-        python -m src.gpcr.cli --receptor "beta2" --ligand "CCO" --output out.csv
-        python -m src.gpcr.cli --input example_inputs.csv --output out.csv
-        ```
-        Output: `receptor`, `ligand_smiles`, `canonical_smiles`, `predicted_class`, `class_id`,
-        `prob_agonist`, `prob_antagonist`, `prob_inactive`, `error`.
-        """
-    )
-
-    st.markdown(
-        """
-        ## More detail in the repo
-        - `docs/MANUSCRIPT_STREAMLIT_SETUP.md` — manuscript paths and export
-        - `docs/STREAMLIT_CLOUD_DEPLOY.md` — Cloud RAM, LFS, secrets
-        - `README.md` — install and overview
+        ## More detail
+        See **README.md** in the repository for install and deploy notes.
         """
     )
 
@@ -1258,9 +1244,8 @@ def render_gpcr_prediction_page():
 
     if not _has_manuscript:
         st.error(
-            "Manuscript models are not available. Export with `scripts/export_manuscript_models.py` and deploy "
-            "`artifacts/manuscript/` (models, `manifest.json`, and `ligand_feature_lookup.sqlite`). "
-            "See `docs/MANUSCRIPT_STREAMLIT_SETUP.md`."
+            "Manuscript models are not available. Deploy `artifacts/manuscript/` "
+            "(models, `manifest.json`, and `ligand_feature_lookup.sqlite`)."
         )
         return
 
@@ -1280,8 +1265,7 @@ def render_gpcr_prediction_page():
     if not regime_options:
         st.error(
             "No exported evaluation regimes found under `artifacts/manuscript/`. "
-            "Run `scripts/export_manuscript_models.py` for at least one of: "
-            "independent_ligand, scaffold, loro."
+            "Deploy at least one of: independent_ligand, scaffold, loro."
         )
         return
 
@@ -1320,8 +1304,8 @@ def render_gpcr_prediction_page():
         if _is_streamlit_cloud() and "rf" not in available_models:
             st.error(
                 "**Random Forest** is not deployed (only a placeholder `model_seed42.pkl` on GitHub, or LFS pull failed). "
-                "Run `scripts/export_manuscript_models.py` locally, then `git lfs push` for "
-                "`artifacts/manuscript/independent_ligand/rf/model_seed42.pkl`."
+                "Deploy `artifacts/manuscript/independent_ligand/rf/model_seed42_cloud.pkl` "
+                "(or full `model_seed42.pkl`) via Git LFS."
             )
             return
         # RF first (default) — ensemble loads RF+XGB+LGB+meta and OOMs on Cloud (~1 GB RAM).
@@ -1383,7 +1367,7 @@ def render_gpcr_prediction_page():
             st.error(
                 f"**Missing** `{expected.name}` for **{model_type_label}**. "
                 + (
-                    "Run `py -3 scripts/shrink_rf_for_cloud.py` for RF."
+                    "Deploy `model_seed42_cloud.pkl` for RF on Cloud."
                     if model_type == "rf"
                     else f"Export and `git lfs push` to `artifacts/manuscript/.../{model_type}/`."
                 )
@@ -1405,7 +1389,6 @@ def render_gpcr_prediction_page():
         except Exception as e:
             st.error(f"Could not load {model_type_label} model: {e}")
             st.info(
-                "Export models first: `docs/MANUSCRIPT_STREAMLIT_SETUP.md` and `scripts/export_manuscript_models.py`.\n"
                 f"Expected: `artifacts/manuscript/{evaluation_regime}/{model_type}/model_seed{seed}.pkl`"
             )
             return
@@ -1459,8 +1442,7 @@ def render_gpcr_prediction_page():
             )
         else:
             st.warning(
-                "**ligand_feature_lookup.sqlite** not deployed — run "
-                "`py -3 scripts/build_ligand_lookup_sqlite.py`, commit via Git LFS, and redeploy. "
+                "**ligand_feature_lookup.sqlite** not deployed — commit it via Git LFS and redeploy. "
                 "Until then, Cloud uses Mordred-only ligand features (less accurate)."
             )
 

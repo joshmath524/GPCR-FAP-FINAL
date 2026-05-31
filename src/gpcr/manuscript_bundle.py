@@ -1,7 +1,7 @@
 """
 Load manuscript-trained models (independent ligand, scaffold, LORO, stacking ensemble).
 
-Artifacts are produced by scripts/export_manuscript_models.py in the training workspace.
+Artifacts are manuscript model exports under artifacts/manuscript/.
 """
 from __future__ import annotations
 
@@ -259,7 +259,7 @@ def load_manuscript_models(
         if path is None:
             raise FileNotFoundError(
                 f"No LORO model for receptor '{receptor_folder}' ({mt}, seed={seed}). "
-                f"Run scripts/export_manuscript_models.py with --regime loro."
+                f"Export LORO models into artifacts/manuscript/loro/."
             )
         model_path = path if path.suffix == ".pkl" else path / f"model_seed{seed}.pkl"
         return [_joblib_load_model(model_path)], manifest
@@ -268,7 +268,7 @@ def load_manuscript_models(
     if model_dir is None:
         raise FileNotFoundError(
             f"Manuscript artifacts not found for regime={regime}, model={mt}, seed={seed}. "
-            f"Expected under {root / regime}. Run scripts/export_manuscript_models.py first."
+            f"Expected under {root / regime}. Deploy exported models first."
         )
 
     if mt == "ensemble":
@@ -289,7 +289,7 @@ def load_manuscript_models(
         if not _valid_model_path(cloud_path):
             raise FileNotFoundError(
                 f"Streamlit Cloud requires {cloud_path.name} (~25 MB, 150 trees). "
-                "Run: py -3 scripts/shrink_rf_for_cloud.py — do not use the full "
+                "Deploy model_seed*_cloud.pkl on Streamlit Cloud — do not use the full "
                 f"model_seed{seed}.pkl (1000 trees) on Cloud; it exceeds ~1 GB RAM."
             )
         pick = cloud_path

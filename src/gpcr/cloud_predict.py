@@ -151,7 +151,7 @@ def predict_cloud_manuscript(
     if model_path is None or not model_path.is_file():
         fallback = cloud_model_path(root, evaluation_regime, mt, seed)
         if mt == "rf":
-            hint = "Run scripts/shrink_rf_for_cloud.py and deploy model_seed*_cloud.pkl via Git LFS."
+            hint = "Deploy model_seed*_cloud.pkl via Git LFS."
         else:
             hint = f"Deploy {fallback.name} under artifacts/manuscript/{evaluation_regime}/{mt}/."
         return _invalid(

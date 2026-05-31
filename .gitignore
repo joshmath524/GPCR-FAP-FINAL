@@ -14,3 +14,5 @@ venv/
 Thumbs.db
 .streamlit/secrets.toml
 runtime_data/
+*.sqlite-shm
+*.sqlite-wal

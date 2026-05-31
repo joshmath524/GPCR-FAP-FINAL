@@ -52,7 +52,7 @@ def load_feature_columns(project_root: Path) -> List[str]:
     manifest_path = _manuscript_root(project_root) / "manifest.json"
     if not manifest_path.exists():
         raise FileNotFoundError(
-            f"Missing {manifest_path}. Run scripts/export_manuscript_models.py from your training repo."
+            f"Missing {manifest_path}. Deploy manuscript exports under artifacts/manuscript/."
         )
     with open(manifest_path, encoding="utf-8") as f:
         data = json.load(f)

@@ -554,7 +554,7 @@ def load_predictor(
       - "scaffold" — scaffold-split trained models (Code S15–S17)
       - "loro" — per-receptor leave-one-out models (Code S18–S20); model picked by receptor at predict time
 
-    Requires artifacts/manuscript/ from scripts/export_manuscript_models.py.
+    Requires artifacts/manuscript/ (exported manuscript models).
     Legacy demo_* bundles (2103 features) are not supported.
     """
     base = Path(artifact_dir)
@@ -569,7 +569,7 @@ def load_predictor(
 
         if not manuscript_bundle_available(project_root):
             raise FileNotFoundError(
-                "Manuscript models not found. Run scripts/export_manuscript_models.py in your "
+                "Manuscript models not found. Export models into "
                 "training repo, then copy artifacts/manuscript/ into this project."
             )
         mt = (model_type or "rf").lower()
@@ -593,7 +593,7 @@ def load_predictor(
     raise FileNotFoundError(
         f"Unknown or missing manuscript evaluation regime: {evaluation_regime!r}. "
         "Use independent_ligand, scaffold, or loro. Export models with "
-        "scripts/export_manuscript_models.py into artifacts/manuscript/."
+        "artifacts/manuscript/ from your training workspace."
     )
 
 
