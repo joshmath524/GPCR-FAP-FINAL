@@ -985,16 +985,16 @@ def render_home_page():
     st.sidebar.markdown("### Project Snapshot")
     st.sidebar.markdown(
         """
-        - **Model focus:** GPCR Class A functional activity
         - **Classes:** Agonist, Antagonist, Inactive
-        - **Features:** Ligand (PhysChem + ECFP) + Receptor (31) + Interaction (14)
-        - **Models:** LightGBM, Random Forest, XGBoost (ensemble)
-        - **Artifacts:** Auto-loads sibling **artifact sahith** or **./artifacts** (2103-dim descriptors)
+        - **Manuscript:** ~1,681 features (Mordred + pocket + interaction)
+        - **Demo:** 2,103 features (ECFP + pocket + interaction)
+        - **Models:** RF, LightGBM, XGBoost (+ ensemble locally)
+        - **Docking:** SMINA top pose + 3D viewer (after Predict)
         """
     )
     st.sidebar.info(
-        "Receptor pocket CSVs default to **GUI_Folder/Josh_Receptor_Features** (set **GPCR_DATA_ROOT** to override). "
-        "Trained models load from **artifact sahith** next to this project or from **./artifacts**."
+        "Receptor data: **Josh_Receptor_Features** (or **GPCR_DATA_ROOT**). "
+        "Models: **artifacts/manuscript/** or **artifacts/demo_***."
     )
 
     st.markdown(
@@ -1010,10 +1010,10 @@ def render_home_page():
     st.markdown(
         """
         ### Model highlights
-        - **Multi-class classification:** Predicts Agonist (class 0), Antagonist (class 1), or Inactive (class 2)
-        - **Feature engineering:** Combines ligand physicochemical properties, ECFP fingerprints, receptor features, and interaction terms
-        - **Ensemble support:** Works with multiple model seeds for robust predictions
-        - **Evaluation regimes:** Supports baseline, random stratified, scaffold split, and LORO (Leave-One-Receptor-Out) evaluation
+        - **Multi-class classification:** Agonist (0), Antagonist (1), Inactive (2)
+        - **Manuscript-aligned features** when `artifacts/manuscript/` is deployed
+        - **Optional SMINA docking** and py3Dmol visualization after prediction
+        - **Evaluation regimes:** independent ligand, scaffold split, LORO (when exported)
         """
     )
 
@@ -1030,8 +1030,8 @@ def render_home_page():
         ---
         ### Navigation
         - **Home:** This overview
-        - **Documentation:** Setup, model details, and usage
-        - **GPCR Ligand Functional Activity Prediction:** Run predictions (receptor + ligand)
+        - **Documentation:** Setup, models, docking, and Cloud notes
+        - **GPCR Ligand Functional Activity Prediction:** Predict, then optionally dock your ligand
         """
     )
 
@@ -1044,40 +1044,40 @@ def render_documentation_page():
     st.markdown(
         """
         ## Purpose
-        This application provides a Streamlit interface for predicting GPCR Class A receptor-ligand functional activity.
-        It supports single predictions (receptor name + ligand SMILES/structure file) and batch CSV processing.
+        This app predicts **functional activity** (Agonist / Antagonist / Inactive) for **Class A GPCR**
+        receptor–ligand pairs from **your** ligand input, then optionally runs **SMINA docking** and a **3D viewer**
+        for the predicted ligand in the selected receptor structure.
+
+        **Pages:** Home · Documentation · GPCR Ligand Functional Activity Prediction
         """
     )
 
     st.markdown(
         """
-        ## Repository structure
-        ```
-        .
-        ├── streamlit_app.py       # Main application
-        ├── requirements.txt      # Dependencies
-        ├── src/gpcr/             # Prediction module
-        │   ├── predict.py        # predict_single, predict_batch, load_predictor
-        │   └── cli.py           # Command-line interface
-        └── artifacts/            # Or use sibling artifact sahith/ with demo_rf/, …
-            ├── model_seed0.pkl (or .joblib)
-            ├── model_seed1.pkl
-            ├── ...
-            ├── feature_config.json
-            └── threshold.json (optional)
-        ```
+        ## Single-pair workflow
+        1. Open **GPCR Ligand Functional Activity Prediction**.
+        2. Choose **evaluation regime** and **model** (manuscript exports when deployed).
+        3. Select a **receptor** (~70 bundled targets).
+        4. Enter **ligand SMILES** or upload a structure file (SDF, MOL, PDB, PDBQT, MOL2, CSV).
+        5. Click **Predict** — outputs class label and P(Agonist), P(Antagonist), P(Inactive).
+        6. Optionally expand **Docking search box**, adjust center/size if needed, then **Run docking and show top pose**.
+
+        **Batch CSV** mode is available on **local** runs only (not on Streamlit Cloud).
         """
     )
 
     st.markdown(
         """
-        ## Local setup
-        1. Create and activate a virtual environment (conda, venv, or poetry).
-        2. Install dependencies: `pip install -r requirements.txt`.
-        3. Receptor data: keep **GUI_Folder** beside **GPCR-FAP-main** (auto-detects **Josh_Receptor_Features**), or set **`GPCR_DATA_ROOT`**.
-        4. **Trained models:** place them under **`./artifacts`** *or* a sibling folder **`artifact sahith`** (same layout: `demo_rf/`, `demo_lightgbm/`, …); the app picks those up automatically (see below).
-        5. Launch the app: `streamlit run streamlit_app.py`.
-        6. Streamlit will open at `http://localhost:8501`. Use the sidebar to switch between pages.
+        ## What ligand is docked?
+        Docking uses the **same compound you submitted for prediction**, not the co-crystal ligand from the PDB.
+
+        | Step | Ligand source |
+        |------|----------------|
+        | **Prediction** | Your SMILES or structure upload → canonical SMILES (RDKit) |
+        | **Docking** | 3D conformer from that canonical SMILES → `query_ligand.sdf` → SMINA |
+        | **Grid box defaults** | Co-crystal `*_ligand_only.pdb` or `docking_assets/receptor_grid_boxes.json` |
+
+        The receptor structure is **`*_receptor_only.pdb`** (on Cloud: `docking_assets/receptor_pdbs/`).
         """
     )
 
@@ -1086,51 +1086,102 @@ def render_documentation_page():
         ## Model overview
         - **Classes:** Agonist (0), Antagonist (1), Inactive (2)
         - **Manuscript mode** (`artifacts/manuscript/`):
-          - Ligand: RDKit + Mordred descriptors from enriched training CSVs (~1,636 columns)
+          - Ligand: RDKit + Mordred (+ SQLite lookup when deployed)
           - Receptor: 31 pocket features from `Josh_Receptor_Features`
-          - Interaction: 14 ligand × receptor terms
-          - **Total: ~1,681 features** (see `manifest.json`)
-          - Trained on ~40,611 pairs; independent-ligand models fit on dev80 (80% canonical SMILES split)
-        - **Demo / legacy mode** (`demo_*` bundles):
-          - Ligand: 10 RDKit + 2048-bit Morgan ECFP4 = 2,058
-          - Receptor + interaction: 31 + 14 → **2,103 features** (small demo training set)
-        - **Models:** Ensemble of LightGBM, Random Forest, or XGBoost models
-        - **Evaluation:** Baseline, Random Stratified, Scaffold Split, LORO
+          - Interaction: 14 ligand × receptor terms → **~1,681 features** (`manifest.json`)
+        - **Demo / legacy mode** (`artifacts/demo_*`): **2,103 features** (ECFP + pocket + interaction)
+        - **Algorithms:** Random Forest, LightGBM, XGBoost; stacking **ensemble** on local runs with enough RAM
+        - **Regimes (when exported):** independent ligand, scaffold split, LORO
+        """
+    )
+
+    if _is_streamlit_cloud():
+        st.markdown(
+            """
+            ## Streamlit Cloud notes
+            - **RAM (~1 GB):** one manuscript model (RF, XGBoost, or LightGBM) per **Predict**; **ensemble is disabled**.
+            - **Ligand features:** best for compounds in `ligand_feature_lookup.sqlite`; novel SMILES may be less accurate.
+            - **Docking:** SMINA + Open Babel ship under `docking_assets/smina_linux/`; reboot after GitHub updates.
+            - **Secrets (optional):** `DATA_DRIVE_FILE_ID` for a slim data zip if pocket CSVs are not in the repo.
+            - See `docs/STREAMLIT_CLOUD_DEPLOY.md` in the repository for deploy checklists.
+            """
+        )
+    else:
+        st.markdown(
+            """
+            ## Local setup
+            1. Create a virtual environment and run `pip install -r requirements.txt`.
+            2. **Receptor data:** place **Josh_Receptor_Features** next to the project or set **`GPCR_DATA_ROOT`**.
+            3. **Manuscript models (optional):** set `GPCR_DATA_ROOT` and `MANUSCRIPT_ML_ROOT`; export with `scripts/export_manuscript_models.py`.
+            4. **Docking (optional):** add `smina` to `docking_assets/`, or run `py -3 scripts/bundle_smina_linux_runtime.py` for Linux.
+            5. Launch: `streamlit run streamlit_app.py` → `http://localhost:8501`.
+            """
+        )
+
+    st.markdown(
+        """
+        ## Repository layout (main paths)
+        ```
+        .
+        ├── streamlit_app.py
+        ├── requirements.txt
+        ├── src/gpcr/
+        │   ├── predict.py
+        │   ├── docking.py
+        │   └── cloud_predict.py
+        ├── artifacts/
+        │   ├── manuscript/
+        │   └── demo_*/
+        ├── Josh_Receptor_Features/
+        └── docking_assets/
+            ├── receptor_grid_boxes.json
+            ├── receptor_pdbs/
+            └── smina_linux/
+        ```
         """
     )
 
     st.markdown(
         """
-        ## Adding your ML artifacts
-        
-        Place your trained model files under **`./artifacts`** (inside this repo) **or** under a sibling folder
-        **`artifact sahith`** (flat layout: `demo_rf/model_seed0.pkl`, …). The GUI checks `./artifacts` first, then **`artifact sahith`**, then **`../artifacts`**.
-        
-        Example layout under `artifacts/`:
-        - `model_seed0.pkl` (or `.joblib`)
-        - `model_seed1.pkl`
-        - `model_seed2.pkl`
-        - ... (as many seeds as you have)
-        
-        Optionally create:
-        - `feature_config.json`: Feature configuration (class names, etc.)
-        - `threshold.json`: Classification thresholds (if applicable)
+        ## Adding / updating ML artifacts
+        - **Manuscript:** `artifacts/manuscript/<regime>/<model>/model_seed42.pkl`
+        - **Cloud RF:** `model_seed42_cloud.pkl` (smaller export)
+        - **Demo:** `artifacts/demo_rf/`, `demo_lightgbm/`, `demo_xgboost/` with `feature_config.json`
+        - **Ligand lookup:** `artifacts/manuscript/ligand_feature_lookup.sqlite`
+        """
+    )
+
+    st.markdown(
+        """
+        ## Docking defaults (SMINA)
+        - **Engine:** SMINA (`exhaustiveness=64`, `num_modes=10`, `seed=42`, scoring `vina`)
+        - **Grid:** centroid ± padded extent from co-crystal ligand (15–20 Å per axis), overridable in the UI
+        - **Output:** top pose score (kcal/mol), py3Dmol complex view, closest-residue contacts
         """
     )
 
     st.markdown(
         """
         ## CLI usage
-        From the project folder:
         ```bash
-        python -m src.gpcr.cli --receptor "ADRB2" --ligand "CCO" --output out.csv
+        python -m src.gpcr.cli --receptor "beta2" --ligand "CCO" --output out.csv
         python -m src.gpcr.cli --input example_inputs.csv --output out.csv
         ```
-        Output columns: receptor, ligand_smiles, canonical_smiles, predicted_class, class_id, prob_agonist, prob_antagonist, prob_inactive, error.
+        Output: `receptor`, `ligand_smiles`, `canonical_smiles`, `predicted_class`, `class_id`,
+        `prob_agonist`, `prob_antagonist`, `prob_inactive`, `error`.
         """
     )
 
-    st.success("Questions? Refer to the ML GPCR Class A Functional Activity Manuscript for model details.")
+    st.markdown(
+        """
+        ## More detail in the repo
+        - `docs/MANUSCRIPT_STREAMLIT_SETUP.md` — manuscript paths and export
+        - `docs/STREAMLIT_CLOUD_DEPLOY.md` — Cloud RAM, LFS, secrets
+        - `README.md` — install and overview
+        """
+    )
+
+    st.success("For model methodology and training splits, see the GPCR Class A functional activity manuscript.")
 
 
 def _load_receptor_select_options():
