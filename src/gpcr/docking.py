@@ -794,6 +794,27 @@ def _bundled_smina_library_dir(files_dir: Path) -> Optional[Path]:
     return lib if lib.is_dir() and any(lib.glob("*.so*")) else None
 
 
+def _bundled_openbabel_plugin_dir(files_dir: Path) -> Optional[Path]:
+    """``lib/openbabel/<version>/`` — format plugins for Open Babel inside SMINA."""
+    base = files_dir / "smina_linux" / "lib" / "openbabel"
+    if not base.is_dir():
+        return None
+    for child in sorted(base.iterdir()):
+        if child.is_dir() and any(child.glob("*.so")):
+            return child
+    return None
+
+
+def _bundled_openbabel_data_dir(files_dir: Path) -> Optional[Path]:
+    base = files_dir / "smina_linux" / "share" / "openbabel"
+    if not base.is_dir():
+        return None
+    for child in sorted(base.iterdir()):
+        if child.is_dir():
+            return child
+    return None
+
+
 def _smina_subprocess_env(files_dir: Path) -> dict:
     env = os.environ.copy()
     lib_dir = _bundled_smina_library_dir(files_dir)
@@ -801,6 +822,12 @@ def _smina_subprocess_env(files_dir: Path) -> dict:
         prev = env.get("LD_LIBRARY_PATH", "").strip()
         lib_path = str(lib_dir)
         env["LD_LIBRARY_PATH"] = f"{lib_path}:{prev}" if prev else lib_path
+    plugin_dir = _bundled_openbabel_plugin_dir(files_dir)
+    if plugin_dir is not None:
+        env["BABEL_LIBDIR"] = str(plugin_dir)
+    data_dir = _bundled_openbabel_data_dir(files_dir)
+    if data_dir is not None:
+        env["BABEL_DATADIR"] = str(data_dir)
     return env
 
 

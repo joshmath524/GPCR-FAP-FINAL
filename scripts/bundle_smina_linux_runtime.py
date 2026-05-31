@@ -46,7 +46,7 @@ def _extract_conda(url: str, dest: Path) -> None:
         dest.mkdir(parents=True, exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(bz2.decompress(data))) as tf:
             for member in tf.getmembers():
-                if member.name.startswith("lib/"):
+                if member.name.startswith(("lib/", "share/openbabel/")):
                     tf.extract(member, dest, filter="data")
         return
     outer = zipfile.ZipFile(io.BytesIO(data))
@@ -132,6 +132,29 @@ def _copy_runtime_libs(stage: Path, lib_out: Path) -> None:
     print(f"  copied {copied} shared library file(s)")
 
 
+def _copy_openbabel_plugins(stage: Path, out_root: Path) -> None:
+    """Open Babel format plugins (required for SMINA ligand/receptor I/O)."""
+    for src in stage.glob("**/lib/openbabel"):
+        if not src.is_dir():
+            continue
+        dst = out_root / "lib" / "openbabel"
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        n_plugins = len(list(dst.rglob("*.so")))
+        print(f"  openbabel plugins: {n_plugins} under {dst}")
+        break
+    for src in stage.glob("**/share/openbabel"):
+        if not src.is_dir():
+            continue
+        dst = out_root / "share" / "openbabel"
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        print(f"  openbabel data: {dst}")
+        break
+
+
 def main() -> None:
     _ensure_zstd()
     if OUT.exists():
@@ -144,6 +167,7 @@ def main() -> None:
     BIN.parent.mkdir(parents=True)
     shutil.copy2(stage / "bin" / "smina", BIN)
     _copy_runtime_libs(stage, LIB)
+    _copy_openbabel_plugins(stage, OUT)
 
     shutil.rmtree(stage)
     legacy = ROOT / "docking_assets" / "smina"
