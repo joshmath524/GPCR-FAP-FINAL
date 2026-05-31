@@ -1054,7 +1054,7 @@ def render_documentation_page():
         ## Single-pair workflow
         1. Open **GPCR Ligand Functional Activity Prediction**.
         2. Choose **evaluation regime** and **model** (manuscript exports under `artifacts/manuscript/`).
-        3. Select a **receptor** (~70 bundled targets).
+        3. Select a **receptor** (68 bundled targets).
         4. Enter **ligand SMILES** or upload a structure file (SDF, MOL, PDB, PDBQT, MOL2, CSV).
         5. Click **Predict** — outputs class label and P(Agonist), P(Antagonist), P(Inactive).
         6. Optionally expand **Docking search box**, adjust center/size if needed, then **Run docking and show top pose**.

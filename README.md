@@ -7,7 +7,7 @@ Streamlit app for **Class A GPCR** receptor–ligand **multiclass** functional a
 
 ## Features
 
-- Predict from SMILES or structure files (SDF, MOL, PDB, PDBQT, MOL2, CSV) for ~70 bundled receptors.
+- Predict from SMILES or structure files (SDF, MOL, PDB, PDBQT, MOL2, CSV) for 68 bundled receptors.
 - Manuscript models: RF, LightGBM, XGBoost (`artifacts/manuscript/`, **6,633** features).
 - Optional SMINA top-pose docking and 3D complex view after prediction.
 
