@@ -1,19 +1,19 @@
 # Manuscript-faithful Streamlit setup
 
-This guide explains how to make the Streamlit app use the **same models** as your paper (independent ligand, scaffold, LORO, stacking ensemble)—not the small `demo_*` bundle.
+The Streamlit GUI uses **only** manuscript exports under `artifacts/manuscript/` (independent ligand, scaffold, LORO, stacking ensemble). Legacy `artifacts/demo_*` bundles (**2,103** features) are **not** exposed in the app.
 
-## Why the current online app is not enough
+## Manuscript vs legacy demo (reference only)
 
-| Item | Manuscript (S9–S21) | Current `artifacts/demo_*` |
-|------|----------------------|----------------------------|
+| Item | Manuscript (S9–S21) | Legacy `artifacts/demo_*` (not in GUI) |
+|------|---------------------|----------------------------------------|
 | Training rows | 40,611 pairs | ~1,500 (demo export) |
-| Ligand features | RDKit + **Mordred** from enriched CSVs (~1,600 cols) | 10 RDKit + 2048 Morgan only (**2103** total) |
+| Ligand features | RDKit + **Mordred** from enriched CSVs (~1,600 cols) | 10 RDKit + 2048 Morgan only (**2,103** total) |
 | Independent ligand | RF/XGB/LGB fit on **dev80** | Unclear / mixed seed files |
 | Scaffold | Separate train split | Not bundled |
 | LORO | **68 models** (one per held-out receptor) | Not bundled |
 | Ensemble | **Stacking** (3 bases → logistic meta on 9 probs) | Partial `StackingClassifier` + wrong averages |
 
-The Streamlit code now supports manuscript models **once you export them** into `artifacts/manuscript/`.
+Export manuscript models into `artifacts/manuscript/` before running the app (see below).
 
 ---
 

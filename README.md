@@ -2,14 +2,14 @@
 
 GPCR-FAP is a Streamlit GUI for **Class A GPCR** receptor-ligand **multiclass** functional activity prediction (Agonist / Antagonist / Inactive), with optional **SMINA pose generation** and 3D receptor-ligand visualization.
 
-Hosted app: https://gpcr-fap.streamlit.app/
+Hosted app: https://gpcrfap.streamlit.app/
 
 Repository: https://github.com/sivaGU/GPCR-FAP
 
 ## What This App Provides
 
 - **Functional activity inference** from SMILES (or common structure files) for each bundled receptor target.
-- **Models:** Random Forest, LightGBM, XGBoost, and ensemble artifacts under `artifacts/demo_*` (multiclass `predict_proba`, **2103** features per row).
+- **Models:** Manuscript Random Forest, LightGBM, XGBoost, and stacking ensemble under `artifacts/manuscript/` (**6,633** features per row).
 - **Receptor assets:** `Josh_Receptor_Features/` — pocket CSVs, conservation summaries, and PDBs per target (~70 folders).
 - **Post-prediction pose generation:** SMINA top-pose generation from the predicted ligand (SMILES input supported), using receptor-specific grid centers from each `*_ligand_only.pdb`.
 - **3D docked complex view:** Receptor cartoon (tan) plus docked ligand pose in sticks (py3Dmol).
@@ -39,11 +39,11 @@ Repository: https://github.com/sivaGU/GPCR-FAP
 
 3. Open `http://localhost:8501`.
 
-## Manuscript Models (Current Setup)
+## Manuscript models (required for the GUI)
 
-This repository can run either legacy demo artifacts (`artifacts/demo_*`) or manuscript exports (`artifacts/manuscript/*`).
+The Streamlit app uses **only** manuscript exports in `artifacts/manuscript/` (not the legacy `artifacts/demo_*` bundles).
 
-### Use Manuscript Models in Streamlit
+### Use manuscript models in Streamlit
 
 Set environment variables in the same terminal before launching:
 
@@ -59,10 +59,9 @@ streamlit run streamlit_app.py
 ```
 
 In the app choose:
-- `Model Family`: Manuscript
-- `Evaluation Regime`: Independent ligand
-- `Model`: RF / XGBoost / LightGBM / Ensemble
-- `Seed`: 42
+- **Evaluation regime:** Independent ligand, Scaffold split, or LORO (whichever you exported)
+- **Model:** RF / XGBoost / LightGBM / Ensemble
+- **Seed:** 42
 
 ### Re-export Manuscript Ensemble
 
@@ -81,7 +80,7 @@ Resume behavior:
 
 - Python **3.10+** recommended (3.10–3.12 tested).
 - Dependencies in `requirements.txt` (RDKit, scikit-learn, LightGBM, XGBoost, Streamlit, py3Dmol, etc.).
-- **Trained models:** `artifacts/demo_rf/`, `demo_lightgbm/`, `demo_xgboost/`, `demo_ensemble/` must contain `model_seed*.pkl` or `.joblib` plus `feature_config.json` (and optional `threshold.json`).
+- **Trained models:** `artifacts/manuscript/<regime>/<model>/model_seed42.pkl`, plus `manifest.json` and `ligand_feature_lookup.sqlite`. See `docs/MANUSCRIPT_STREAMLIT_SETUP.md`.
 - **Docking engine:** SMINA binary available in `docking_assets/` or system `PATH`.
 
 ## Supported Inputs
@@ -107,18 +106,16 @@ GPCR-FAP/
 ├── README.md
 ├── requirements.txt
 ├── data/
-│   ├── gpcr_class_a_receptors.txt
-│   └── demo_reference.csv
+│   └── gpcr_class_a_receptors.txt
 ├── src/
 │   └── gpcr/
 │       ├── predict.py
+│       ├── manuscript_features.py
+│       ├── cloud_predict.py
 │       ├── structure_view.py
 │       └── docking.py
 ├── artifacts/
-│   ├── demo_rf/
-│   ├── demo_lightgbm/
-│   ├── demo_xgboost/
-│   └── demo_ensemble/
+│   └── manuscript/                    # regime / model / seed exports
 ├── docking_assets/
 │   ├── smina / smina.exe
 │   └── receptor_grid_boxes.json

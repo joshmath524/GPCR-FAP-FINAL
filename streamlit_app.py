@@ -25,24 +25,23 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 def _artifact_tree_has_models(artifacts_dir: Path) -> bool:
+    """True when ``artifacts/manuscript/`` contains loadable exported models."""
     if not artifacts_dir.is_dir():
         return False
-    for sub in artifacts_dir.glob("demo_*"):
-        if sub.is_dir():
-            if list(sub.glob("model_seed*.pkl")) or list(sub.glob("model_seed*.joblib")):
-                return True
-            if list(sub.glob("*.pkl")) or list(sub.glob("*.joblib")):
-                return True
-    if list(artifacts_dir.glob("model_seed*.pkl")) or list(artifacts_dir.glob("model_seed*.joblib")):
-        return True
-    return bool(list(artifacts_dir.glob("*.pkl")) or list(artifacts_dir.glob("*.joblib")))
+    root = artifacts_dir.parent if artifacts_dir.name == "artifacts" else artifacts_dir
+    try:
+        from src.gpcr.manuscript_bundle import manuscript_bundle_available
+
+        return bool(manuscript_bundle_available(root))
+    except Exception:
+        return False
 
 
 def _resolve_handoff_dir() -> Path:
     """
-    Resolve the directory passed to load_predictor() (may be .../artifacts or a flat demo bundle).
+    Resolve the project directory for manuscript models and data.
 
-    Order: ./artifacts in this repo → sibling **artifact sahith** (updated handoff) → ../artifacts → cwd.
+    Order: ./artifacts in this repo → sibling **artifact sahith** → ../artifacts → cwd.
     """
     local_art = PROJECT_ROOT / "artifacts"
     if _artifact_tree_has_models(local_art):
@@ -722,10 +721,9 @@ try:
 except ImportError:
     st_components = None
 
-# Data paths for demo tool
+# Data paths
 DATA_DIR = PROJECT_ROOT / "data"
 RECEPTORS_FILE = DATA_DIR / "gpcr_class_a_receptors.txt"
-DEMO_REFERENCE_FILE = DATA_DIR / "demo_reference.csv"
 
 
 def extract_smiles_from_file(file_content: bytes, file_extension: str) -> Optional[str]:
@@ -986,15 +984,14 @@ def render_home_page():
     st.sidebar.markdown(
         """
         - **Classes:** Agonist, Antagonist, Inactive
-        - **Manuscript:** **6,633** features (6,588 ligand + 31 receptor + 14 interaction)
-        - **Demo:** **2,103** features (2,058 ECFP ligand + 31 + 14)
+        - **Features:** **6,633** (6,588 ligand + 31 receptor + 14 interaction)
         - **Models:** RF, LightGBM, XGBoost (+ ensemble locally)
         - **Docking:** SMINA top pose + 3D viewer (after Predict)
         """
     )
     st.sidebar.info(
         "Receptor data: **Josh_Receptor_Features** (or **GPCR_DATA_ROOT**). "
-        "Models: **artifacts/manuscript/** or **artifacts/demo_***."
+        "Models: **artifacts/manuscript/** only."
     )
 
     st.markdown(
@@ -1011,10 +1008,9 @@ def render_home_page():
         """
         ### Model highlights
         - **Multi-class classification:** Agonist (0), Antagonist (1), Inactive (2)
-        - **Manuscript models:** **6,633** features per prediction when `artifacts/manuscript/` is deployed
-        - **Demo bundle:** **2,103** features (legacy `artifacts/demo_*`)
+        - **Manuscript models:** **6,633** features per prediction (`artifacts/manuscript/`)
         - **Optional SMINA docking** and py3Dmol visualization after prediction
-        - **Regimes:** independent ligand, scaffold split, LORO (manuscript) or demo bundle (legacy)
+        - **Regimes:** independent ligand, scaffold split, LORO
         """
     )
 
@@ -1057,7 +1053,7 @@ def render_documentation_page():
         """
         ## Single-pair workflow
         1. Open **GPCR Ligand Functional Activity Prediction**.
-        2. Choose **evaluation regime** and **model** (manuscript exports when deployed).
+        2. Choose **evaluation regime** and **model** (manuscript exports under `artifacts/manuscript/`).
         3. Select a **receptor** (~70 bundled targets).
         4. Enter **ligand SMILES** or upload a structure file (SDF, MOL, PDB, PDBQT, MOL2, CSV).
         5. Click **Predict** — outputs class label and P(Agonist), P(Antagonist), P(Inactive).
@@ -1088,26 +1084,22 @@ def render_documentation_page():
         - **Classes:** Agonist (0), Antagonist (1), Inactive (2)
         - **Algorithms:** Random Forest, LightGBM, XGBoost; stacking **ensemble** (local only, needs more RAM)
 
-        ### Feature vectors (what the `.pkl` files expect)
+        ### Feature vector (**6,633** per prediction)
 
-        | Mode | When you use it | Ligand | Receptor | Interaction | **Total** |
-        |------|-----------------|--------|----------|-------------|------------|
-        | **Manuscript** | Regime = *Independent ligand*, *Scaffold*, or *LORO* | **6,588** enriched / Mordred columns (`manifest.json`) | **31** pocket | **14** `INT_*` | **6,633** |
-        | **Demo (legacy)** | Regime = *Demo bundle (2103 features, legacy)* | **2,058** (10 RDKit + 2048 ECFP4) | **31** | **14** | **2,103** |
+        | Block | Count | Source |
+        |-------|------:|--------|
+        | Ligand | **6,588** | Enriched / Mordred columns in `artifacts/manuscript/manifest.json` |
+        | Receptor | **31** | Pocket features from `Josh_Receptor_Features` |
+        | Interaction | **14** | `INT_*` ligand × receptor products |
+        | **Total** | **6,633** | All manuscript `.pkl` models |
 
-        Receptor (31) and interaction (14) use the same pocket definitions in both modes; only the **ligand block** differs.
+        Ligand values are filled from **`ligand_feature_lookup.sqlite`** when your canonical SMILES is in the lookup;
+        otherwise missing columns are **0** (novel SMILES are less reliable).
 
-        **Manuscript ligand columns** come from the training enriched tables (union of all descriptor names).
-        At inference, values are filled from **`ligand_feature_lookup.sqlite`** when your canonical SMILES is in the lookup;
-        otherwise missing columns are set to **0** (predictions for novel SMILES are less reliable).
-
-        **Demo ligand columns** are computed on the fly: 10 physicochemical descriptors + Morgan fingerprint (radius 2, 2048 bits).
-
-        ### Evaluation regimes (manuscript exports)
+        ### Evaluation regimes
         - **Independent ligand** — models fit on dev80 (paper’s main holdout-style split)
         - **Scaffold split** — scaffold-based train/test split
-        - **LORO** — leave-one-receptor-out (one model per held-out receptor when exported)
-        - **Demo bundle** — small legacy `artifacts/demo_*` models (2,103 features), not the paper’s full feature union
+        - **LORO** — leave-one-receptor-out (per-receptor models when exported)
         """
     )
 
@@ -1128,7 +1120,7 @@ def render_documentation_page():
             ## Local setup
             1. Create a virtual environment and run `pip install -r requirements.txt`.
             2. **Receptor data:** place **Josh_Receptor_Features** next to the project or set **`GPCR_DATA_ROOT`**.
-            3. **Manuscript models (optional):** set `GPCR_DATA_ROOT` and `MANUSCRIPT_ML_ROOT`; export with `scripts/export_manuscript_models.py`.
+            3. **Manuscript models:** set `GPCR_DATA_ROOT` and `MANUSCRIPT_ML_ROOT`; export with `scripts/export_manuscript_models.py`.
             4. **Docking (optional):** add `smina` to `docking_assets/`, or run `py -3 scripts/bundle_smina_linux_runtime.py` for Linux.
             5. Launch: `streamlit run streamlit_app.py` → `http://localhost:8501`.
             """
@@ -1146,8 +1138,7 @@ def render_documentation_page():
         │   ├── docking.py
         │   └── cloud_predict.py
         ├── artifacts/
-        │   ├── manuscript/
-        │   └── demo_*/
+        │   └── manuscript/
         ├── Josh_Receptor_Features/
         └── docking_assets/
             ├── receptor_grid_boxes.json
@@ -1160,10 +1151,11 @@ def render_documentation_page():
     st.markdown(
         """
         ## Adding / updating ML artifacts
-        - **Manuscript:** `artifacts/manuscript/<regime>/<model>/model_seed42.pkl`
+        - **Models:** `artifacts/manuscript/<regime>/<model>/model_seed42.pkl`
         - **Cloud RF:** `model_seed42_cloud.pkl` (smaller export)
-        - **Demo:** `artifacts/demo_rf/`, `demo_lightgbm/`, `demo_xgboost/` with `feature_config.json`
-        - **Ligand lookup:** `artifacts/manuscript/ligand_feature_lookup.sqlite`
+        - **Ligand lookup:** `artifacts/manuscript/ligand_feature_lookup.sqlite` (Git LFS on deploy)
+        - **Manifest:** `artifacts/manuscript/manifest.json` (`n_features`: 6633)
+        - Export: `scripts/export_manuscript_models.py` — see `docs/MANUSCRIPT_STREAMLIT_SETUP.md`
         """
     )
 
@@ -1217,103 +1209,6 @@ def _load_receptor_select_options():
         return []
 
 
-def _load_demo_reference():
-    """Load demo reference data (receptor, ligand, experimental_class) for comparison table."""
-    if not DEMO_REFERENCE_FILE.exists():
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(DEMO_REFERENCE_FILE, encoding="utf-8")
-    except pd.errors.ParserError:
-        df = pd.read_csv(DEMO_REFERENCE_FILE, encoding="utf-8", engine="python", on_bad_lines="skip")
-    return df
-
-
-def render_demo_prediction_page():
-    """Render the Demo Prediction Tool page: predicted vs experimental comparison table."""
-    st.title("Demo Prediction Tool")
-    st.caption(
-        "Compare model predictions to experimental values (Agonist / Antagonist / Inactive) "
-        "using Random Forest, LightGBM, XGBoost, or Ensemble."
-    )
-
-    ref_df = _load_demo_reference()
-    if ref_df.empty or "smiles" not in ref_df.columns or "experimental_class" not in ref_df.columns:
-        st.warning(
-            "Demo reference data not found or missing columns. Add data/demo_reference.csv with columns: "
-            "receptor, name, smiles, experimental_class (Agonist/Antagonist/Inactive)."
-        )
-        return
-
-    st.sidebar.markdown("### Demo settings")
-    model_type_label = st.sidebar.selectbox(
-        "Model",
-        options=["Random Forest", "LightGBM", "XGBoost", "Ensemble"],
-        index=0,
-        key="demo_model",
-    )
-    model_type_map = {"Random Forest": "rf", "LightGBM": "lightgbm", "XGBoost": "xgboost", "Ensemble": "ensemble"}
-    model_type = model_type_map[model_type_label]
-
-    try:
-        predictor = load_active_predictor(model_type)
-    except Exception as e:
-        st.error(f"Could not load {model_type_label} model: {e}")
-        st.info(
-            "Ensure **./artifacts** or sibling **artifact sahith** contains **demo_rf**, **demo_lightgbm**, "
-            "**demo_xgboost**, and/or **demo_ensemble** with **model_seed*.pkl** and **feature_config.json**."
-        )
-        return
-
-    # Run predictions for all reference rows
-    pairs = [(str(row["receptor"]), str(row["smiles"])) for _, row in ref_df.iterrows()]
-    with st.spinner(f"Running {model_type_label} on {len(ref_df)} reference compounds..."):
-        results = predict_batch(pairs, predictor=predictor)
-
-    # Build comparison table: experimental vs predicted
-    out = ref_df[["receptor", "name", "smiles", "experimental_class"]].copy()
-    out["predicted_class"] = [r.predicted_class for r in results]
-    out["P(Agonist)"] = [round(r.prob_agonist, 4) for r in results]
-    out["P(Antagonist)"] = [round(r.prob_antagonist, 4) for r in results]
-    out["P(Inactive)"] = [round(r.prob_inactive, 4) for r in results]
-    out["match"] = [
-        "✓" if str(row["experimental_class"]).strip().lower() == str(row["predicted_class"]).strip().lower() else "✗"
-        for _, row in out.iterrows()
-    ]
-    out = out.rename(columns={"match": "Match"})
-
-    st.markdown(f"**Model:** {model_type_label} · **Reference compounds:** {len(ref_df)}")
-
-    # Summary metrics
-    n_match = out["Match"].eq("✓").sum()
-    accuracy = n_match / len(out) * 100 if len(out) else 0
-    st.metric("Agreement with experiment", f"{n_match} / {len(out)} ({accuracy:.1f}%)")
-
-    st.subheader("Predicted vs experimental")
-    st.dataframe(
-        out[
-            [
-                "receptor",
-                "name",
-                "experimental_class",
-                "predicted_class",
-                "P(Agonist)",
-                "P(Antagonist)",
-                "P(Inactive)",
-                "Match",
-            ]
-        ],
-        use_container_width=True,
-        height=400,
-    )
-    st.download_button(
-        "Download comparison (CSV)",
-        out.to_csv(index=False),
-        f"demo_predicted_vs_experimental_{model_type}.csv",
-        "text/csv",
-        key="demo_download",
-    )
-
-
 def render_gpcr_prediction_page():
     """Render the GPCR Ligand Functional Activity Prediction page."""
     if _is_streamlit_cloud() and not st.session_state.get("_gpcr_predict_unlocked"):
@@ -1361,39 +1256,39 @@ def render_gpcr_prediction_page():
     _ms_regimes = _artifact_scan.get("regimes") or {}
     _ms_seeds = _artifact_scan.get("seeds") or [42]
 
-    st.markdown("#### Model source (manuscript vs demo)")
+    if not _has_manuscript:
+        st.error(
+            "Manuscript models are not available. Export with `scripts/export_manuscript_models.py` and deploy "
+            "`artifacts/manuscript/` (models, `manifest.json`, and `ligand_feature_lookup.sqlite`). "
+            "See `docs/MANUSCRIPT_STREAMLIT_SETUP.md`."
+        )
+        return
+
+    st.markdown("#### Evaluation regime")
     _regime_labels = {
         "independent_ligand": "Independent ligand test (paper: dev80-trained)",
         "scaffold": "Scaffold split",
         "loro": "Leave-one-receptor-out (LORO)",
     }
-    regime_map: dict = {"Demo bundle (2103 features, legacy)": None}
+    regime_map: dict = {}
     regime_options: list = []
+    for key, label in _regime_labels.items():
+        if _ms_regimes.get(key):
+            regime_options.append(label)
+            regime_map[label] = key
 
-    if _has_manuscript:
-        for key, label in _regime_labels.items():
-            if _ms_regimes.get(key):
-                regime_options.append(label)
-                regime_map[label] = key
-        regime_options.append("Demo bundle (2103 features, legacy)")
-        regime_map["Demo bundle (2103 features, legacy)"] = None
-        if not regime_options:
-            regime_options = ["Demo bundle (2103 features, legacy)"]
-        regime_index = 0
-        if "ensemble" in (_ms_regimes.get("independent_ligand") or {}):
-            pass  # default stays independent ligand
-    else:
-        regime_options = ["Demo bundle (2103 features, legacy)"]
-        regime_index = 0
-        st.info(
-            "Manuscript models not deployed yet. Using legacy demo bundle (~2103 features). "
-            "Run `scripts/export_manuscript_models.py` and add `artifacts/manuscript/`."
+    if not regime_options:
+        st.error(
+            "No exported evaluation regimes found under `artifacts/manuscript/`. "
+            "Run `scripts/export_manuscript_models.py` for at least one of: "
+            "independent_ligand, scaffold, loro."
         )
+        return
 
     regime_label = st.selectbox(
         "Evaluation regime",
         regime_options,
-        index=regime_index,
+        index=0,
         key="gpcr_eval_regime",
         help="Only regimes with exported artifacts are listed.",
     )
@@ -1433,8 +1328,15 @@ def render_gpcr_prediction_page():
         model_options = [_model_labels[m] for m in ("rf", "lightgbm", "xgboost", "ensemble") if m in available_models]
         default_model_ix = 0
     else:
-        model_options = list(_model_labels.values())
-        default_model_ix = 0
+        st.error(f"No models listed for regime `{evaluation_regime}`. Re-export manuscript artifacts.")
+        return
+
+    if not model_options:
+        st.error(
+            f"No models available for regime `{evaluation_regime}` on this deployment. "
+            "Export RF, XGBoost, and/or LightGBM for this regime and redeploy."
+        )
+        return
 
     st.markdown("#### Select model")
     model_type_label = st.selectbox(
@@ -1461,13 +1363,6 @@ def render_gpcr_prediction_page():
             key="gpcr_model_seed",
             help="Seeds exported to artifacts/manuscript/ (default: 42).",
         )
-
-    if evaluation_regime and not _has_manuscript:
-        st.error(
-            "Manuscript models not found. Run `scripts/export_manuscript_models.py` on your training PC, "
-            "then copy `artifacts/manuscript/` into this project. See `docs/MANUSCRIPT_STREAMLIT_SETUP.md`."
-        )
-        return
 
     if _is_streamlit_cloud() and model_type == "ensemble":
         st.warning("Ensemble needs RF+XGB+LGB together — not available on Streamlit Cloud (~1 GB RAM).")
@@ -1509,16 +1404,10 @@ def render_gpcr_prediction_page():
             predictor = load_active_predictor(model_type, evaluation_regime=evaluation_regime, seed=seed)
         except Exception as e:
             st.error(f"Could not load {model_type_label} model: {e}")
-            if evaluation_regime:
-                st.info(
-                    "Export models first: `docs/MANUSCRIPT_STREAMLIT_SETUP.md` and `scripts/export_manuscript_models.py`.\n"
-                    f"Expected: `artifacts/manuscript/{evaluation_regime}/{model_type}/model_seed{seed}.pkl`"
-                )
-            else:
-                st.info(
-                    "Ensure **./artifacts** contains demo subfolders (**demo_rf/**, etc.) with valid **model_seed0.pkl** "
-                    "(placeholder tiny .pkl files are ignored)."
-                )
+            st.info(
+                "Export models first: `docs/MANUSCRIPT_STREAMLIT_SETUP.md` and `scripts/export_manuscript_models.py`.\n"
+                f"Expected: `artifacts/manuscript/{evaluation_regime}/{model_type}/model_seed{seed}.pkl`"
+            )
             return
 
     if predictor is None and not cloud_ephemeral_mode:
@@ -1534,7 +1423,7 @@ def render_gpcr_prediction_page():
         )
         _mode = "manuscript"
     else:
-        _mode = getattr(predictor, "feature_mode", "demo_2103")
+        _mode = getattr(predictor, "feature_mode", "manuscript")
     if not cloud_ephemeral_mode:
         st.sidebar.info(
             f"**Regime:** {regime_label}\n\n"

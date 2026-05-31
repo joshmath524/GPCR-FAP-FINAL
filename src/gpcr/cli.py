@@ -46,12 +46,36 @@ def main():
         default=".",
         help="Directory containing artifacts/ folder",
     )
-    
+    parser.add_argument(
+        "--evaluation-regime",
+        type=str,
+        default="independent_ligand",
+        choices=("independent_ligand", "scaffold", "loro"),
+        help="Manuscript evaluation regime (default: independent_ligand)",
+    )
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default="rf",
+        choices=("rf", "lightgbm", "xgboost", "ensemble"),
+        help="Manuscript model family (default: rf)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Model random seed (default: 42)",
+    )
+
     args = parser.parse_args()
-    
-    # Load predictor
+
     try:
-        predictor = load_predictor(args.artifact_dir)
+        predictor = load_predictor(
+            args.artifact_dir,
+            model_type=args.model_type,
+            evaluation_regime=args.evaluation_regime,
+            seed=args.seed,
+        )
     except Exception as e:
         print(f"Error loading predictor: {e}", file=sys.stderr)
         sys.exit(1)

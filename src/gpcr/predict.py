@@ -320,7 +320,7 @@ class GPCRPredictor:
         class_names: List[str] = None,
         threshold: Optional[float] = None,
         expected_feature_dim: Optional[int] = None,
-        feature_mode: str = "demo_2103",
+        feature_mode: str = "manuscript",
         project_root: Optional[Path] = None,
         evaluation_regime: Optional[str] = None,
         model_type: Optional[str] = None,
@@ -357,16 +357,11 @@ class GPCRPredictor:
         return models
 
     def _build_feature_vector(self, receptor: str, canon: str) -> Tuple[Optional[np.ndarray], str]:
-        if self.feature_mode == "manuscript":
-            from .manuscript_features import build_manuscript_feature_row
+        from .manuscript_features import build_manuscript_feature_row
 
-            vec = build_manuscript_feature_row(self.project_root, receptor, canon)
-            if vec is None:
-                return None, "Could not build manuscript feature row (check manifest, Mordred, receptor pocket)."
-            return vec, ""
-        vec = _compute_full_features(receptor, canon)
+        vec = build_manuscript_feature_row(self.project_root, receptor, canon)
         if vec is None:
-            return None, "receptor_or_features"
+            return None, "Could not build manuscript feature row (check manifest, Mordred, receptor pocket)."
         return vec, ""
 
     def predict(self, receptor: str, ligand_smiles: str) -> PredictResult:
@@ -448,7 +443,7 @@ class GPCRPredictor:
                 error=(
                     f"Descriptor vector length {int(features.shape[0])} does not match "
                     f"trained model expectation ({int(self.expected_feature_dim)}). "
-                    "Check feature_config.json and predict.py layout (2103 = ligand+receptor+interaction)."
+                    "Check manifest.json feature_columns align with training (6633 features for manuscript models)."
                 ),
             )
 
@@ -459,6 +454,11 @@ class GPCRPredictor:
         all_probs = []
         for model in models:
             try:
+                if hasattr(model, "base_model_probabilities"):
+                    stacked = model.base_model_probabilities(X)
+                    for i in range(stacked.shape[1]):
+                        all_probs.append(stacked[0, i])
+                    continue
                 # Try predict_proba first (for sklearn models)
                 if hasattr(model, 'predict_proba'):
                     raw = model.predict_proba(X)
@@ -553,15 +553,15 @@ def load_predictor(
       - "independent_ligand" — Table 1 / dev80-trained models (Code S9–S11)
       - "scaffold" — scaffold-split trained models (Code S15–S17)
       - "loro" — per-receptor leave-one-out models (Code S18–S20); model picked by receptor at predict time
-      - None — legacy demo bundle under artifacts/demo_*
 
-    Requires artifacts/manuscript/ from scripts/export_manuscript_models.py when using regimes above.
+    Requires artifacts/manuscript/ from scripts/export_manuscript_models.py.
+    Legacy demo_* bundles (2103 features) are not supported.
     """
     base = Path(artifact_dir)
     project_root = base if (base / "streamlit_app.py").exists() else base
 
-    regime = (evaluation_regime or "").strip().lower() or None
-    if regime in ("independent", "independent_ligand", "indep"):
+    regime = (evaluation_regime or "").strip().lower() or "independent_ligand"
+    if regime in ("independent", "indep"):
         regime = "independent_ligand"
 
     if regime in ("independent_ligand", "scaffold", "loro"):
@@ -590,93 +590,10 @@ def load_predictor(
             seed=seed,
         )
 
-    art = base / "artifacts"
-    if not art.exists():
-        art = base
-
-    def _discover_model_files(folder: Path) -> List[Path]:
-        files = list(folder.glob("model_seed*.pkl")) + list(folder.glob("model_seed*.joblib"))
-        files = [f for f in files if f.stat().st_size >= 50_000]
-        if not files:
-            files = [f for f in folder.glob("*.pkl") if f.stat().st_size >= 50_000]
-            files += [f for f in folder.glob("*.joblib") if f.stat().st_size >= 50_000]
-        return sorted(files)
-
-    selected_art = art
-
-    # Demo tool: try model-type-specific folder first, only if it has model files
-    if model_type and model_type.lower() in ("rf", "random_forest", "lightgbm", "lgb", "xgboost", "xgb", "ensemble"):
-        mt = model_type.lower()
-        if mt in ("rf", "random_forest"):
-            demo_dir = art / "demo_rf"
-        elif mt in ("lightgbm", "lgb"):
-            demo_dir = art / "demo_lightgbm"
-        elif mt in ("xgboost", "xgb"):
-            demo_dir = art / "demo_xgboost"
-        else:
-            demo_dir = art / "demo_ensemble"
-        if demo_dir.exists() and _discover_model_files(demo_dir):
-            selected_art = demo_dir
-
-    # Load models
-    models = []
-    model_files = _discover_model_files(selected_art)
-    if not model_files and selected_art != art:
-        # Fallback to base artifacts if selected demo folder has no models.
-        selected_art = art
-        model_files = _discover_model_files(selected_art)
-    
-    for model_file in sorted(model_files):
-        try:
-            models.append(joblib.load(model_file))
-        except Exception as e:
-            print(f"Warning: Could not load {model_file}: {e}")
-    
-    if not models:
-        raise FileNotFoundError(
-            f"No model files found in {selected_art}. "
-            f"Expected: model_seed*.pkl or model_seed*.joblib"
-        )
-    
-    # Load config
-    class_names = ["Agonist", "Antagonist", "Inactive"]
-    threshold = None
-    expected_feature_dim: Optional[int] = None
-
-    config_path = selected_art / "feature_config.json"
-    if config_path.exists():
-        import json
-        with open(config_path, "r") as f:
-            config = json.load(f)
-            class_names = config.get("class_names", class_names)
-            nft = config.get("n_features_total")
-            if nft is not None:
-                try:
-                    expected_feature_dim = int(nft)
-                except (TypeError, ValueError):
-                    expected_feature_dim = None
-    
-    threshold_path = selected_art / "threshold.json"
-    if threshold_path.exists():
-        import json
-        with open(threshold_path, "r") as f:
-            thresh_data = json.load(f)
-            threshold = thresh_data.get("threshold", threshold)
-    
-    if expected_feature_dim is None:
-        for m in models:
-            nfi = getattr(m, "n_features_in_", None)
-            if nfi is not None:
-                expected_feature_dim = int(nfi)
-                break
-
-    return GPCRPredictor(
-        models=models,
-        class_names=class_names,
-        threshold=threshold,
-        expected_feature_dim=expected_feature_dim,
-        feature_mode="demo_2103",
-        project_root=project_root,
+    raise FileNotFoundError(
+        f"Unknown or missing manuscript evaluation regime: {evaluation_regime!r}. "
+        "Use independent_ligand, scaffold, or loro. Export models with "
+        "scripts/export_manuscript_models.py into artifacts/manuscript/."
     )
 
 
