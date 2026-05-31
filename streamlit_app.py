@@ -1150,17 +1150,6 @@ def render_documentation_page():
 
     st.markdown(
         """
-        ## Adding / updating ML artifacts
-        - **Models:** `artifacts/manuscript/<regime>/<model>/model_seed42.pkl`
-        - **Cloud RF:** `model_seed42_cloud.pkl` (smaller export)
-        - **Ligand lookup:** `artifacts/manuscript/ligand_feature_lookup.sqlite` (Git LFS on deploy)
-        - **Manifest:** `artifacts/manuscript/manifest.json` (`n_features`: 6633)
-        - Export manuscript models into this layout from your training workspace, then commit via Git LFS.
-        """
-    )
-
-    st.markdown(
-        """
         ## Docking defaults (SMINA)
         - **Engine:** SMINA (`exhaustiveness=64`, `num_modes=10`, `seed=42`, scoring `vina`)
         - **Grid:** centroid ± padded extent from co-crystal ligand (15–20 Å per axis), overridable in the UI
