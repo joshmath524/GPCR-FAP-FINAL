@@ -1093,9 +1093,6 @@ def render_documentation_page():
         | Interaction | **14** | `INT_*` ligand × receptor products |
         | **Total** | **6,633** | All manuscript `.pkl` models |
 
-        Ligand values are filled from **`ligand_feature_lookup.sqlite`** when your canonical SMILES is in the lookup;
-        otherwise missing columns are **0** (novel SMILES are less reliable).
-
         ### Evaluation regimes
         - **Independent ligand** — models fit on dev80 (paper’s main holdout-style split)
         - **Scaffold split** — scaffold-based train/test split
