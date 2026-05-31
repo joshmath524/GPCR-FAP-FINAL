@@ -986,8 +986,8 @@ def render_home_page():
     st.sidebar.markdown(
         """
         - **Classes:** Agonist, Antagonist, Inactive
-        - **Manuscript:** ~1,681 features (Mordred + pocket + interaction)
-        - **Demo:** 2,103 features (ECFP + pocket + interaction)
+        - **Manuscript:** **6,633** features (6,588 ligand + 31 receptor + 14 interaction)
+        - **Demo:** **2,103** features (2,058 ECFP ligand + 31 + 14)
         - **Models:** RF, LightGBM, XGBoost (+ ensemble locally)
         - **Docking:** SMINA top pose + 3D viewer (after Predict)
         """
@@ -1011,9 +1011,10 @@ def render_home_page():
         """
         ### Model highlights
         - **Multi-class classification:** Agonist (0), Antagonist (1), Inactive (2)
-        - **Manuscript-aligned features** when `artifacts/manuscript/` is deployed
+        - **Manuscript models:** **6,633** features per prediction when `artifacts/manuscript/` is deployed
+        - **Demo bundle:** **2,103** features (legacy `artifacts/demo_*`)
         - **Optional SMINA docking** and py3Dmol visualization after prediction
-        - **Evaluation regimes:** independent ligand, scaffold split, LORO (when exported)
+        - **Regimes:** independent ligand, scaffold split, LORO (manuscript) or demo bundle (legacy)
         """
     )
 
@@ -1085,13 +1086,28 @@ def render_documentation_page():
         """
         ## Model overview
         - **Classes:** Agonist (0), Antagonist (1), Inactive (2)
-        - **Manuscript mode** (`artifacts/manuscript/`):
-          - Ligand: RDKit + Mordred (+ SQLite lookup when deployed)
-          - Receptor: 31 pocket features from `Josh_Receptor_Features`
-          - Interaction: 14 ligand × receptor terms → **~1,681 features** (`manifest.json`)
-        - **Demo / legacy mode** (`artifacts/demo_*`): **2,103 features** (ECFP + pocket + interaction)
-        - **Algorithms:** Random Forest, LightGBM, XGBoost; stacking **ensemble** on local runs with enough RAM
-        - **Regimes (when exported):** independent ligand, scaffold split, LORO
+        - **Algorithms:** Random Forest, LightGBM, XGBoost; stacking **ensemble** (local only, needs more RAM)
+
+        ### Feature vectors (what the `.pkl` files expect)
+
+        | Mode | When you use it | Ligand | Receptor | Interaction | **Total** |
+        |------|-----------------|--------|----------|-------------|------------|
+        | **Manuscript** | Regime = *Independent ligand*, *Scaffold*, or *LORO* | **6,588** enriched / Mordred columns (`manifest.json`) | **31** pocket | **14** `INT_*` | **6,633** |
+        | **Demo (legacy)** | Regime = *Demo bundle (2103 features, legacy)* | **2,058** (10 RDKit + 2048 ECFP4) | **31** | **14** | **2,103** |
+
+        Receptor (31) and interaction (14) use the same pocket definitions in both modes; only the **ligand block** differs.
+
+        **Manuscript ligand columns** come from the training enriched tables (union of all descriptor names).
+        At inference, values are filled from **`ligand_feature_lookup.sqlite`** when your canonical SMILES is in the lookup;
+        otherwise missing columns are set to **0** (predictions for novel SMILES are less reliable).
+
+        **Demo ligand columns** are computed on the fly: 10 physicochemical descriptors + Morgan fingerprint (radius 2, 2048 bits).
+
+        ### Evaluation regimes (manuscript exports)
+        - **Independent ligand** — models fit on dev80 (paper’s main holdout-style split)
+        - **Scaffold split** — scaffold-based train/test split
+        - **LORO** — leave-one-receptor-out (one model per held-out receptor when exported)
+        - **Demo bundle** — small legacy `artifacts/demo_*` models (2,103 features), not the paper’s full feature union
         """
     )
 
@@ -1100,7 +1116,7 @@ def render_documentation_page():
             """
             ## Streamlit Cloud notes
             - **RAM (~1 GB):** one manuscript model (RF, XGBoost, or LightGBM) per **Predict**; **ensemble is disabled**.
-            - **Ligand features:** best for compounds in `ligand_feature_lookup.sqlite`; novel SMILES may be less accurate.
+            - **Features:** manuscript models use **6,633** inputs; ligand values are best when SMILES is in `ligand_feature_lookup.sqlite`.
             - **Docking:** SMINA + Open Babel ship under `docking_assets/smina_linux/`; reboot after GitHub updates.
             - **Secrets (optional):** `DATA_DRIVE_FILE_ID` for a slim data zip if pocket CSVs are not in the repo.
             - See `docs/STREAMLIT_CLOUD_DEPLOY.md` in the repository for deploy checklists.
