@@ -1172,19 +1172,6 @@ def _load_receptor_select_options():
 
 def render_gpcr_prediction_page():
     """Render the GPCR Ligand Functional Activity Prediction page."""
-    if _is_streamlit_cloud() and not st.session_state.get("_gpcr_predict_unlocked"):
-        st.title("GPCR Ligand Functional Activity Prediction")
-        st.info(
-            "This page loads the **Random Forest** model (~170 MB on disk). Streamlit Cloud has **~1 GB RAM**, "
-            "so the app opens in steps. Ligand descriptors use **Mordred + pocket features** on Cloud "
-            "(the full training lookup is skipped to avoid crashes)."
-        )
-        if st.button("Continue to prediction setup", type="primary", key="gpcr_unlock_tab"):
-            st.session_state["_gpcr_predict_unlocked"] = True
-            _reset_predictor_session()
-            st.rerun()
-        return
-
     if not _bootstrap_cloud_gpcr_data():
         st.error(
             "Training data is not ready. If **ligand_feature_lookup.joblib** is in the repo, set "
