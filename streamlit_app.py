@@ -1103,18 +1103,7 @@ def render_documentation_page():
         """
     )
 
-    if _is_streamlit_cloud():
-        st.markdown(
-            """
-            ## Streamlit Cloud notes
-            - **RAM (~1 GB):** one manuscript model (RF, XGBoost, or LightGBM) per **Predict**; **ensemble is disabled**.
-            - **Features:** manuscript models use **6,633** inputs; ligand values are best when SMILES is in `ligand_feature_lookup.sqlite`.
-            - **Docking:** SMINA + Open Babel ship under `docking_assets/smina_linux/`; reboot after GitHub updates.
-            - **Secrets (optional):** `DATA_DRIVE_FILE_ID` for a slim data zip if pocket CSVs are not in the repo.
-            - Set Streamlit secrets: `DATA_DRIVE_FILE_ID` or `DATA_ZIP_URL` if pocket CSVs are not in the repo.
-            """
-        )
-    else:
+    if not _is_streamlit_cloud():
         st.markdown(
             """
             ## Local setup
